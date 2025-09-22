@@ -1,0 +1,124 @@
+# ChronoTick Inference Configuration - Hybrid: TimesFM (GPU) + Chronos (CPU)
+# Optimal GPU+CPU combination: GPU for complex long-term, CPU for fast short-term
+
+short_term:
+  model_name: chronos
+  device: cpu
+  enabled: true
+  inference_interval: 1.0
+  prediction_horizon: 5
+  context_length: 100
+  max_uncertainty: 0.1
+  model_params:
+    prediction_length: 5
+    repo: "amazon/chronos-bolt-base"
+    size: "base"
+    multivariate: true
+
+long_term:
+  model_name: timesfm
+  device: cuda
+  enabled: true
+  inference_interval: 30.0
+  prediction_horizon: 300
+  context_length: 1024
+  max_uncertainty: 0.10
+  model_params:
+    context_len: 1024
+    horizon_len: 300
+    repo: "google/timesfm-2.0-500m-pytorch"
+    covariates_enabled: true
+
+fusion:
+  enabled: true
+  method: inverse_variance
+  uncertainty_threshold: 0.04
+  fallback_weights:
+    short_term: 0.6   # Chronos good for short-term responsiveness
+    long_term: 0.4    # TimesFM excellent for long-term accuracy
+
+preprocessing:
+  outlier_removal:
+    enabled: true
+    method: iqr
+    threshold: 1.8
+  missing_value_handling:
+    enabled: true
+    method: interpolate
+  normalization:
+    enabled: true
+    method: zscore
+
+covariates:
+  enabled: true
+  variables:
+    - cpu_usage
+    - temperature
+    - memory_usage
+    - voltage
+    - frequency
+  future_variables:
+    - temperature
+    - cpu_usage
+
+performance:
+  max_memory_mb: 6144  # GPU for TimesFM + CPU for Chronos
+  model_timeout: 15.0
+  cache_size: 15
+  batch_size: 8
+
+logging:
+  level: INFO
+  log_predictions: true
+  log_uncertainty: true
+  log_fusion_weights: true
+
+clock:
+  frequency_type: second
+  frequency_code: 9
+
+# Real clock measurement configuration
+clock_measurement:
+  ntp:
+    servers:
+      - "pool.ntp.org"
+      - "time.google.com" 
+      - "time.cloudflare.com"
+      - "time.nist.gov"
+    timeout_seconds: 2.0
+    max_acceptable_uncertainty: 0.010  # 10ms max
+    min_stratum: 3
+    
+  timing:
+    warm_up:
+      duration_seconds: 180        # 3 minutes warm-up
+      measurement_interval: 1.0    # Every second during warm-up
+    normal_operation:
+      measurement_interval: 300.0  # Every 5 minutes during normal operation
+
+# Predictive scheduling configuration  
+prediction_scheduling:
+  cpu_model:
+    prediction_interval: 30.0     # Predict every 30 seconds
+    prediction_horizon: 30        # 30 seconds ahead
+    prediction_lead_time: 5.0     # Start predicting 5 seconds early
+    max_inference_time: 2.0       # Budget 2 seconds for CPU inference
+    
+  gpu_model:
+    prediction_interval: 300.0    # Predict every 5 minutes (matches NTP)
+    prediction_horizon: 300       # 5 minutes ahead
+    prediction_lead_time: 15.0    # Start predicting 15 seconds early
+    max_inference_time: 10.0      # Budget 10 seconds for GPU inference
+    
+  fusion:
+    temporal_weighting: true      # Progressive CPU->GPU weighting
+    uncertainty_weighting: true   # Inverse-variance weighting from design.md
+    
+  dataset:
+    maintain_frequency: 1.0       # Keep 1-second measurement frequency
+    retrospective_correction: true # Apply design.md Algorithm 1
+    prediction_cache_size: 10     # Keep recent predictions cached
+    
+  error_bounds:
+    method: "error_propagation"   # Only ML model uncertainties
+    confidence_level: 0.95        # 95% confidence intervals

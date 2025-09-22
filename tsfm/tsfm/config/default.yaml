@@ -1,0 +1,63 @@
+# Default configuration for TSFM library
+
+models:
+  timesfm:
+    model_repo: "google/timesfm-2.0-500m-pytorch"
+    context_len: 2048  # 4x increase from 512
+    horizon_len: flexible  # No longer limited to 96
+    input_patch_len: 32
+    output_patch_len: 128
+    num_layers: 50  # TimesFM 2.0 has 50 layers
+    model_dims: 1280
+    covariates_support: true  # NEW: Dynamic covariates
+    
+  ttm:
+    model_repo: "ibm-granite/granite-timeseries-ttm-r2"  # Fixed: was ttm-v1
+    context_length: 512
+    prediction_length: 96
+    multivariate_support: true  # NEW: Enhanced multivariate
+    exogenous_support: true  # NEW: Covariates infusion
+    
+  chronos:
+    model_size: "base"  # Upgraded from tiny
+    model_repo: "amazon/chronos-bolt-base"  # NEW: Chronos-Bolt
+    prediction_length: 96
+    num_samples: 20
+    multivariate_support: true  # NEW: Multivariate forecasting
+    direct_multistep: true  # NEW: 250x faster inference
+    
+  toto:
+    model_repo: "Datadog/Toto-Open-Base-1.0"  # Already latest
+    prediction_length: 336
+    num_samples: 256
+    samples_per_batch: 256
+    multivariate_support: true  # Enhanced multivariate attention
+    covariates_support: true  # High-cardinality covariates
+    
+  time_moe:
+    variant: "200M"  # Upgraded from 50M
+    model_repo: "Maple728/TimeMoE-200M"  # NEW: ICLR 2025 model
+    max_context_length: 4096
+    prediction_length: 96
+    mixture_of_experts: true  # MoE architecture
+    covariates_adaptable: true  # Architecture ready for covariates
+
+datasets:
+  default_normalization: "standard"
+  train_ratio: 0.7
+  val_ratio: 0.15
+  test_ratio: 0.15
+  
+testing:
+  default_context_length: 512
+  default_horizon: 96
+  benchmark_datasets: ["ETTh1", "ETTh2"]
+  metrics: ["mae", "rmse", "mape"]
+  tolerance:
+    mae: 1000.0
+    rmse: 1000.0
+    mape: 1000.0
+    
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"

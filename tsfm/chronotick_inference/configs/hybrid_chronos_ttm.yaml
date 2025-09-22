@@ -1,0 +1,76 @@
+# ChronoTick Inference Configuration - Hybrid CPU: Chronos + TTM
+# Best balance for CPU deployments with different model strengths
+
+short_term:
+  model_name: chronos
+  device: cpu
+  enabled: true
+  inference_interval: 1.0
+  prediction_horizon: 5
+  context_length: 100
+  max_uncertainty: 0.1
+  model_params:
+    prediction_length: 5
+    repo: "amazon/chronos-bolt-base"
+    size: "base"
+    multivariate: true
+
+long_term:
+  model_name: ttm
+  device: cpu
+  enabled: true
+  inference_interval: 30.0
+  prediction_horizon: 96
+  context_length: 512
+  max_uncertainty: 0.12
+  model_params:
+    prediction_length: 96
+    context_length: 512
+    patch_length: 16
+    num_layers: 3
+
+fusion:
+  enabled: true
+  method: inverse_variance
+  uncertainty_threshold: 0.045
+  fallback_weights:
+    short_term: 0.65  # Chronos better for short-term
+    long_term: 0.35   # TTM better for long-term
+
+preprocessing:
+  outlier_removal:
+    enabled: true
+    method: iqr
+    threshold: 1.8
+  missing_value_handling:
+    enabled: true
+    method: interpolate
+  normalization:
+    enabled: true
+    method: zscore
+
+covariates:
+  enabled: true
+  variables:
+    - cpu_usage
+    - temperature
+    - memory_usage
+    - voltage
+    - frequency
+  future_variables: []
+
+performance:
+  max_memory_mb: 3072  # Need more memory for two different models
+  model_timeout: 12.0
+  cache_size: 8
+  batch_size: 2
+
+logging:
+  level: INFO
+  log_predictions: true
+  log_uncertainty: true
+  log_fusion_weights: true
+
+clock:
+  frequency_type: second
+  frequency_code: 9

@@ -1,0 +1,128 @@
+# ChronoTick Inference Configuration - Multi-Device Full Setup
+# Ultimate configuration using both CPU and GPU with load balancing
+
+short_term:
+  model_name: chronos
+  device: cpu  # Fast CPU inference for low latency
+  enabled: true
+  inference_interval: 1.0
+  prediction_horizon: 5
+  context_length: 100
+  max_uncertainty: 0.08
+  model_params:
+    prediction_length: 5
+    repo: "amazon/chronos-bolt-base"
+    size: "base"
+    multivariate: true
+
+long_term:
+  model_name: timesfm
+  device: cuda  # GPU for complex long-term modeling
+  enabled: true
+  inference_interval: 30.0
+  prediction_horizon: 300
+  context_length: 1024
+  max_uncertainty: 0.10
+  model_params:
+    context_len: 1024
+    horizon_len: 300
+    repo: "google/timesfm-2.0-500m-pytorch"
+    covariates_enabled: true
+
+# Additional backup models for failover
+backup_models:
+  short_term_backup:
+    model_name: ttm
+    device: cpu
+    enabled: true
+  long_term_backup:
+    model_name: toto
+    device: cuda
+    enabled: true
+
+fusion:
+  enabled: true
+  method: inverse_variance
+  uncertainty_threshold: 0.03
+  fallback_weights:
+    short_term: 0.6
+    long_term: 0.4
+  # Advanced fusion with model confidence weighting
+  adaptive_weighting: true
+  confidence_threshold: 0.85
+
+preprocessing:
+  outlier_removal:
+    enabled: true
+    method: iqr
+    threshold: 1.5
+  missing_value_handling:
+    enabled: true
+    method: interpolate
+  normalization:
+    enabled: true
+    method: zscore
+  # Advanced preprocessing
+  seasonal_decomposition:
+    enabled: true
+    period: 3600  # 1 hour seasonal patterns
+
+covariates:
+  enabled: true
+  variables:
+    - cpu_usage
+    - temperature
+    - memory_usage
+    - voltage
+    - frequency
+    - disk_io
+    - network_io
+    - load_average
+  future_variables:
+    - temperature
+    - cpu_usage
+  # Advanced covariate features
+  lag_features:
+    enabled: true
+    max_lags: 10
+  rolling_features:
+    enabled: true
+    windows: [5, 15, 60]
+
+performance:
+  max_memory_mb: 12288  # High-end system
+  model_timeout: 25.0
+  cache_size: 50
+  batch_size: 16
+  # Load balancing
+  parallel_inference: true
+  max_concurrent_models: 4
+
+monitoring:
+  enabled: true
+  metrics_collection_interval: 5.0
+  performance_logging: true
+  model_drift_detection: true
+  alert_thresholds:
+    inference_time: 5.0
+    memory_usage: 10240
+    prediction_error: 0.2
+
+logging:
+  level: INFO
+  log_predictions: true
+  log_uncertainty: true
+  log_fusion_weights: true
+  log_performance_metrics: true
+  log_model_health: true
+
+clock:
+  frequency_type: second
+  frequency_code: 9
+
+# High availability settings
+high_availability:
+  enabled: true
+  health_check_interval: 10.0
+  auto_failover: true
+  model_redundancy: true

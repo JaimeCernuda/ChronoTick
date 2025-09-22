@@ -1,0 +1,112 @@
+# ChronoTick Inference Layer Configuration
+
+# Short-term model configuration (CPU-based, high-frequency)
+short_term:
+  model_name: "chronos"  # Options: chronos, ttm
+  device: "cpu"
+  enabled: true
+  inference_interval: 1.0  # seconds
+  prediction_horizon: 5    # seconds ahead
+  context_length: 300      # 5 minutes of history
+  max_uncertainty: 0.1     # Maximum acceptable uncertainty (seconds)
+  
+  # Model-specific parameters
+  model_params:
+    prediction_length: 5
+    num_samples: 20
+
+# Long-term model configuration (optional GPU-based)
+long_term:
+  model_name: "timesfm"  # Options: timesfm, toto
+  device: "cpu"          # "cuda" if GPU available
+  enabled: true
+  inference_interval: 30.0  # seconds
+  prediction_horizon: 300   # 5 minutes ahead
+  context_length: 3600      # 1 hour of history
+  quantile_levels: [0.1, 0.5, 0.9]  # For uncertainty quantification
+  
+  # Model-specific parameters
+  model_params:
+    context_len: 3600
+    horizon_len: 300
+
+# Model fusion configuration
+fusion:
+  enabled: true
+  method: "inverse_variance"  # Options: inverse_variance, weighted_average
+  uncertainty_threshold: 0.05  # Switch to long-term if short-term uncertainty exceeds this
+  temporal_decay: 0.9          # Decay factor for older predictions
+  
+  # Weights when uncertainty-based weighting is not available
+  fallback_weights:
+    short_term: 0.7
+    long_term: 0.3
+
+# Data preprocessing
+preprocessing:
+  outlier_removal:
+    enabled: true
+    method: "iqr"
+    threshold: 1.5
+  
+  missing_value_handling:
+    enabled: true
+    method: "interpolate"
+  
+  normalization:
+    enabled: false  # Let models handle their own normalization
+    method: "zscore"
+
+# Covariates configuration (exogenous variables)
+covariates:
+  enabled: true
+  variables:
+    - "cpu_usage"
+    - "memory_usage" 
+    - "temperature"
+    - "voltage"
+    - "frequency"
+    - "network_io"
+    - "disk_io"
+  
+  # Future covariates (if available)
+  future_variables:
+    - "scheduled_load"
+    - "maintenance_windows"
+
+# Performance and resource management
+performance:
+  max_memory_mb: 512
+  model_timeout: 5.0  # seconds
+  batch_size: 1
+  prefetch_predictions: true
+  cache_size: 100
+  
+  # CPU affinity for inference threads
+  cpu_affinity:
+    short_term: [0]  # CPU core for short-term model
+    long_term: [1]   # CPU core for long-term model
+
+# Logging and monitoring
+logging:
+  level: "INFO"
+  log_predictions: true
+  log_uncertainty: true
+  log_fusion_weights: false
+  performance_metrics: true
+
+# Model management
+models:
+  auto_reload: false
+  health_check_interval: 60.0  # seconds
+  fallback_enabled: true
+  
+  # Environment selection (matches TSFM environments)
+  environment: "core-models"  # Options: core-models, ttm, toto, time-moe
+
+# Clock-specific configuration
+clock:
+  frequency_type: "second"  # For 1-second sampling
+  frequency_code: 9         # Numeric code for seconds
+  drift_estimation_window: 600  # 10 minutes for drift calculation
+  offset_estimation_window: 60   # 1 minute for offset calculation
