@@ -91,9 +91,10 @@ class ChronoTickInferenceEngine:
         self.shutdown_event = threading.Event()
         
         # Prediction cache
+        cache_size = self.config.get('performance', {}).get('cache_size', 10)
         self.prediction_cache = {
-            ModelType.SHORT_TERM: queue.Queue(maxsize=self.config['performance']['cache_size']),
-            ModelType.LONG_TERM: queue.Queue(maxsize=self.config['performance']['cache_size'])
+            ModelType.SHORT_TERM: queue.Queue(maxsize=cache_size),
+            ModelType.LONG_TERM: queue.Queue(maxsize=cache_size)
         }
         
         # Performance tracking
@@ -130,7 +131,9 @@ class ChronoTickInferenceEngine:
     
     def _setup_logging(self):
         """Setup logging configuration."""
-        level = getattr(logging, self.config['logging']['level'])
+        logging_config = self.config.get('logging', {})
+        level_name = logging_config.get('level', 'INFO')
+        level = getattr(logging, level_name, logging.INFO)
         logging.basicConfig(
             level=level,
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -138,12 +141,15 @@ class ChronoTickInferenceEngine:
     
     def _create_frequency_info(self) -> FrequencyInfo:
         """Create frequency information for time series models."""
-        clock_config = self.config['clock']
+        clock_config = self.config.get('clock', {})
+        freq_type = clock_config.get('frequency_type', 'second')
+        freq_code = clock_config.get('frequency_code', 9)  # Default to 9 (second)
+
         return self.factory.create_frequency_info(
-            freq_str=clock_config['frequency_type'][0].upper(),  # 'S' for second
-            freq_value=clock_config['frequency_code'],
+            freq_str=freq_type[0].upper(),  # 'S' for second
+            freq_value=freq_code,
             is_regular=True,
-            detected_freq=clock_config['frequency_type'][0].upper()
+            detected_freq=freq_type[0].upper()
         )
     
     def initialize_models(self) -> bool:
@@ -213,39 +219,47 @@ class ChronoTickInferenceEngine:
             processed_history = self._preprocess_data(offset_history)
             
             # Limit context length
-            context_length = short_config['context_length']
+            context_length = short_config.get('context_length', 100)
             if len(processed_history) > context_length:
                 processed_history = processed_history[-context_length:]
-            
+
             # Check minimum data requirements
             if len(processed_history) < 10:  # Minimum required points
                 logger.warning("Insufficient data for short-term prediction")
                 return None
-            
+
             # Generate prediction
-            horizon = short_config['prediction_horizon']
+            horizon = short_config.get('prediction_horizon', 5)
             
-            if covariates and self.config['covariates']['enabled']:
+            if covariates and self.config.get('covariates', {}).get('enabled', False):
                 # Use covariates if available and enabled
                 covariates_input = self._prepare_covariates_input(
                     processed_history, covariates, horizon
                 )
+                # Get use_covariates setting from config
+                use_covariates = short_config.get('use_covariates', False)
                 result = self.short_term_model.forecast_with_covariates(
-                    covariates_input, 
+                    covariates_input,
                     horizon,
-                    frequency=self.frequency_info
+                    frequency=self.frequency_info,
+                    use_covariates=use_covariates  # Pass through to model
                 )
             else:
                 # Standard univariate prediction
+                # TimesFM expects 2D input: shape (batch_size, sequence_length)
+                # Reshape 1D history (length,) to 2D (1, length)
+                if processed_history.ndim == 1:
+                    processed_history = processed_history.reshape(1, -1)
+
                 result = self.short_term_model.forecast(
-                    processed_history, 
+                    processed_history,
                     horizon,
                     freq=self.frequency_info.freq_value
                 )
             
             # Calculate uncertainty (if quantiles available)
             uncertainty = self._calculate_uncertainty(result.quantiles)
-            confidence = self._calculate_confidence(uncertainty, short_config['max_uncertainty'])
+            confidence = self._calculate_confidence(uncertainty, short_config.get('max_uncertainty', 0.1))
             
             # Create prediction result
             prediction = PredictionResult(
@@ -264,7 +278,7 @@ class ChronoTickInferenceEngine:
             self.performance_stats['total_inference_time'] += prediction.inference_time
             
             # Log prediction if enabled
-            if self.config['logging']['log_predictions']:
+            if self.config.get('logging', {}).get('log_predictions', False):
                 logger.debug(f"Short-term prediction: {prediction.predictions[0]:.6f}s, "
                            f"confidence: {confidence:.3f}")
             
@@ -299,30 +313,38 @@ class ChronoTickInferenceEngine:
             processed_history = self._preprocess_data(offset_history)
             
             # Use longer context for long-term model
-            context_length = long_config['context_length']
+            context_length = long_config.get('context_length', 300)
             if len(processed_history) > context_length:
                 processed_history = processed_history[-context_length:]
-            
+
             # Check minimum data requirements
             if len(processed_history) < 60:  # Need more data for long-term
                 logger.warning("Insufficient data for long-term prediction")
                 return None
-            
+
             # Generate prediction
-            horizon = long_config['prediction_horizon']
+            horizon = long_config.get('prediction_horizon', 60)
             
-            if covariates and self.config['covariates']['enabled']:
+            if covariates and self.config.get('covariates', {}).get('enabled', False):
                 # Use covariates if available and enabled
                 covariates_input = self._prepare_covariates_input(
                     processed_history, covariates, horizon
                 )
+                # Get use_covariates setting from config
+                use_covariates = long_config.get('use_covariates', False)
                 result = self.long_term_model.forecast_with_covariates(
                     covariates_input,
                     horizon,
-                    frequency=self.frequency_info
+                    frequency=self.frequency_info,
+                    use_covariates=use_covariates  # Pass through to model
                 )
             else:
                 # Standard univariate prediction
+                # TimesFM expects 2D input: shape (batch_size, sequence_length)
+                # Reshape 1D history (length,) to 2D (1, length)
+                if processed_history.ndim == 1:
+                    processed_history = processed_history.reshape(1, -1)
+
                 result = self.long_term_model.forecast(
                     processed_history,
                     horizon,
@@ -350,7 +372,7 @@ class ChronoTickInferenceEngine:
             self.performance_stats['total_inference_time'] += prediction.inference_time
             
             # Log prediction if enabled
-            if self.config['logging']['log_predictions']:
+            if self.config.get('logging', {}).get('log_predictions', False):
                 logger.debug(f"Long-term prediction: {prediction.predictions[0]:.6f}s, "
                            f"horizon: {horizon}s")
             
@@ -418,7 +440,7 @@ class ChronoTickInferenceEngine:
             self.performance_stats['fusion_operations'] += 1
             
             # Log fusion if enabled
-            if self.config['logging']['log_fusion_weights']:
+            if self.config.get('logging', {}).get('log_fusion_weights', False):
                 logger.debug(f"Fusion weights: {fused_result.weights}")
             
             return fused_result
@@ -515,35 +537,64 @@ class ChronoTickInferenceEngine:
             }
         )
     
+    def validate_input(self, data: Any) -> bool:
+        """
+        Validate input data for predictions.
+
+        Args:
+            data: Input data to validate
+
+        Returns:
+            True if valid
+
+        Raises:
+            ValueError: If data is invalid
+        """
+        if not isinstance(data, np.ndarray):
+            raise ValueError(f"Input data must be numpy array, got {type(data)}")
+
+        if data.size == 0:
+            raise ValueError("Input data cannot be empty")
+
+        if np.any(np.isnan(data)):
+            raise ValueError("Input data contains NaN values")
+
+        if np.any(np.isinf(data)):
+            raise ValueError("Input data contains infinite values")
+
+        return True
+
     def _preprocess_data(self, data: np.ndarray) -> np.ndarray:
         """
         Preprocess time series data.
-        
+
         Args:
             data: Raw time series data
-            
+
         Returns:
             Preprocessed data
         """
         processed = data.copy()
-        
-        preprocessing_config = self.config['preprocessing']
-        
+
+        preprocessing_config = self.config.get('preprocessing', {})
+
         # Remove outliers
-        if preprocessing_config['outlier_removal']['enabled']:
+        outlier_config = preprocessing_config.get('outlier_removal', {})
+        if outlier_config.get('enabled', False):
             processed = remove_outliers(
                 processed,
-                method=preprocessing_config['outlier_removal']['method'],
-                threshold=preprocessing_config['outlier_removal']['threshold']
+                method=outlier_config.get('method', 'iqr'),
+                threshold=outlier_config.get('threshold', 2.0)
             )
-        
+
         # Fill missing values
-        if preprocessing_config['missing_value_handling']['enabled']:
+        missing_config = preprocessing_config.get('missing_value_handling', {})
+        if missing_config.get('enabled', False):
             processed = fill_missing_values(
                 processed,
-                method=preprocessing_config['missing_value_handling']['method']
+                method=missing_config.get('method', 'interpolate')
             )
-        
+
         return processed
     
     def _prepare_covariates_input(self,
@@ -693,7 +744,7 @@ class ChronoTickInferenceEngine:
         
         # Add memory usage
         stats['current_memory_mb'] = psutil.Process().memory_info().rss / 1024 / 1024
-        stats['max_memory_mb'] = self.config['performance']['max_memory_mb']
+        stats['max_memory_mb'] = self.config.get('performance', {}).get('max_memory_mb', 512)
         
         return stats
     

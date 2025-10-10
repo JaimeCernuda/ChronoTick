@@ -1,0 +1,73 @@
+# ChronoTick Evaluation 1 - Dataset Collection Configuration
+
+# Collection settings
+collection:
+  duration_hours: 168  # 7 days
+  sampling_interval_seconds: 1.0
+  max_file_size_mb: 100
+  backup_interval_hours: 6
+
+# NTP Configuration
+ntp:
+  servers:
+    - "pool.ntp.org"
+    - "time.google.com"
+    - "time.cloudflare.com"
+    - "time.nist.gov"
+  timeout_seconds: 2.0
+  max_acceptable_uncertainty: 0.010  # 10ms
+  min_stratum: 2
+  max_delay: 0.100  # 100ms
+
+# System metrics to collect
+system_metrics:
+  enabled: true
+  cpu_temp: true
+  gpu_temp: true  # If available
+  cpu_frequency: true
+  cpu_load: true
+  memory_usage: true
+  network_latency: true
+  disk_io: true
+
+# Environment-specific settings
+environments:
+  local:
+    node_id: "local-amd"
+    gpu_monitoring: true
+    thermal_stress_test: false
+
+  ares:
+    node_id_prefix: "ares-node"
+    slurm_integration: false  # Direct node access
+    pfs_monitoring: true
+    infiniband_monitoring: true
+
+  chameleon:
+    node_id_prefix: "chameleon-node"
+    gpu_monitoring: true
+    openstack_metadata: true
+
+# Data quality checks
+quality_control:
+  max_offset_seconds: 10.0  # Flag measurements > 10s offset
+  max_drift_rate: 1e-3     # Flag drift > 1ms/s
+  min_ntp_stratum: 1
+  max_ntp_delay: 0.500     # 500ms
+
+# Output settings
+output:
+  format: "csv"
+  compression: "gzip"
+  include_metadata: true
+  timestamp_format: "iso8601"
+  precision_digits: 9  # nanosecond precision
+
+# Ground truth reference
+ground_truth:
+  method: "ntp_ensemble"  # Use ensemble of NTP servers
+  reference_servers:
+    - "time.nist.gov"
+    - "time.google.com"
+  consensus_threshold: 3  # Require 3+ servers to agree
+  max_reference_uncertainty: 0.001  # 1ms

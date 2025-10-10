@@ -7,7 +7,7 @@ license = { text = "MIT" }
 authors = [
     { name = "ChronoTick Team" }
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.11,<3.13"  # JAX dependency requires Python >= 3.11, limited to <3.13 for toto compatibility
 dependencies = [
     "torch>=2.0.0",
     "numpy>=1.24.0",
@@ -26,6 +26,7 @@ dependencies = [
     "psutil>=5.9.0",
     # Note: transformers and model packages moved to optional dependencies
     # due to version conflicts between TTM and Toto
+    "ntplib>=0.4.0",
 ]
 
 [project.optional-dependencies]
@@ -52,7 +53,7 @@ ttm = [
     "transformers==4.38.0",  # Exact version required for TTM tinytimemixer architecture
     "chronos-forecasting>=1.0.0",
     "timesfm>=1.0.0",
-    "granite-tsfm @ git+https://github.com/ibm-granite/granite-tsfm.git",
+    # "granite-tsfm @ git+https://github.com/ibm-granite/granite-tsfm.git",  # Temporarily disabled due to version conflict
 ]
 
 time-moe = [
@@ -72,14 +73,19 @@ toto = [
 core-models = [
     "chronos-forecasting>=1.0.0",
     "timesfm>=1.0.0",
+    "jax>=0.7.0",  # Required for TimesFM covariates support
+    "jaxlib>=0.7.0",  # Required for TimesFM covariates support
 ]
 
 # ChronoTick inference layer integration
 chronotick = [
     "chronos-forecasting>=1.0.0",
     "timesfm>=1.0.0",
+    "jax>=0.7.0",  # Required for TimesFM covariates support
+    "jaxlib>=0.7.0",  # Required for TimesFM covariates support
     "psutil>=5.9.0",
     "rich>=13.0.0",
+    "ntplib>=0.4.0",  # For NTP validation
 ]
 
 [build-system]

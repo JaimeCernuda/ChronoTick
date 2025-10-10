@@ -276,6 +276,33 @@ class DatasetManager:
                 'uncertainty': measurement.uncertainty,
                 'corrected': False
             }
+
+    def add_prediction(self, timestamp: float, offset: float, drift: float,
+                      source: str, uncertainty: float, confidence: float):
+        """
+        Add ML prediction to dataset for autoregressive training.
+
+        Args:
+            timestamp: Prediction timestamp
+            offset: Predicted offset correction
+            drift: Predicted drift rate
+            source: Prediction source ('cpu', 'gpu', 'fusion')
+            uncertainty: Prediction uncertainty
+            confidence: Prediction confidence [0,1]
+        """
+        with self.lock:
+            self.measurement_dataset[int(timestamp)] = {
+                'timestamp': timestamp,
+                'offset': offset,
+                'drift': drift,
+                'source': f'prediction_{source}',  # Tag as prediction
+                'uncertainty': uncertainty,
+                'confidence': confidence,
+                'corrected': False
+            }
+
+            logger.debug(f"[DATASET_STORE] Stored {source} prediction: t={timestamp:.0f}, "
+                        f"offset={offset*1000:.2f}ms, uncertainty={uncertainty*1000:.2f}ms")
     
     def fill_measurement_gaps(self, start_time: float, end_time: float,
                              corrections: List[CorrectionWithBounds]):
@@ -341,17 +368,32 @@ class DatasetManager:
         with self.lock:
             return self.measurement_dataset.get(int(timestamp))
     
-    def get_recent_measurements(self, window_seconds: int = 300) -> List[Tuple[float, float]]:
-        """Get recent offset measurements for TSFM model input"""
+    def get_recent_measurements(self, window_seconds: int = None) -> List[Tuple[float, float]]:
+        """
+        Get recent offset measurements for TSFM model input.
+
+        Args:
+            window_seconds: Time window in seconds. If None, returns ALL measurements (no filtering).
+                          This prevents the dataset from being artificially truncated over time.
+
+        Returns:
+            List of (timestamp, offset) tuples sorted by timestamp
+        """
         with self.lock:
-            current_time = time.time()
-            cutoff_time = current_time - window_seconds
-            
-            measurements = []
-            for timestamp, data in self.measurement_dataset.items():
-                if timestamp >= cutoff_time:
-                    measurements.append((timestamp, data['offset']))
-            
+            if window_seconds is None:
+                # No time filtering - return ALL accumulated measurements
+                # This is the default to prevent dataset shrinkage over time
+                measurements = [(ts, data['offset']) for ts, data in self.measurement_dataset.items()]
+            else:
+                # Apply time window filtering
+                current_time = time.time()
+                cutoff_time = current_time - window_seconds
+
+                measurements = []
+                for timestamp, data in self.measurement_dataset.items():
+                    if timestamp >= cutoff_time:
+                        measurements.append((timestamp, data['offset']))
+
             # Sort by timestamp
             measurements.sort(key=lambda x: x[0])
             return measurements
@@ -406,6 +448,7 @@ class RealDataPipeline:
         # Pipeline state
         self.initialized = False
         self.last_ntp_time = 0
+        self.last_processed_ntp_count = 0  # Track how many NTP measurements we've processed
         self.warm_up_complete = False
         self.lock = threading.Lock()
         
@@ -419,42 +462,95 @@ class RealDataPipeline:
         }
         
     def initialize(self, cpu_model=None, gpu_model=None):
-        """Initialize the pipeline with model interfaces"""
+        """
+        Initialize the pipeline with model interfaces.
+
+        Args:
+            cpu_model: REQUIRED - Short-term CPU model for frequent predictions
+            gpu_model: OPTIONAL - Long-term model for infrequent predictions (can run on CPU or GPU)
+
+        Raises:
+            ValueError: If cpu_model is not provided
+        """
         logger.info("Initializing real data pipeline...")
-        
+
+        # CRITICAL: Short-term CPU model is REQUIRED for ChronoTick to work
+        if cpu_model is None:
+            error_msg = (
+                "ChronoTick requires at least a short-term CPU model to function. "
+                "The short-term model provides frequent (1Hz) predictions for immediate time corrections. "
+                "Without ML models, ChronoTick degrades to pure NTP with simple linear extrapolation. "
+                "\n\nTo fix this, initialize the pipeline with a CPU model:"
+                "\n  factory = TSFMFactory()"
+                "\n  cpu_model = factory.load_model('chronos', device='cpu')"
+                "\n  pipeline.initialize(cpu_model=cpu_model_wrapper)"
+                "\n\nThe long-term GPU model is optional but recommended for better long-range predictions."
+            )
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+
+        # GPU model is optional but recommended
+        if gpu_model is None:
+            logger.warning(
+                "Long-term model not provided - running in short-term only mode. "
+                "For best results, provide both cpu_model and gpu_model for dual-model fusion."
+            )
+
         # Set model interfaces for predictive scheduler
-        if cpu_model or gpu_model:
-            self.predictive_scheduler.set_model_interfaces(cpu_model, gpu_model, self.fusion_engine)
-        
-        # Start components
+        self.predictive_scheduler.set_model_interfaces(cpu_model, gpu_model, self.fusion_engine)
+        logger.info(f"Models configured: cpu_model={'Yes' if cpu_model else 'No'}, "
+                   f"gpu_model={'Yes' if gpu_model else 'No'}, "
+                   f"fusion={'Enabled' if cpu_model and gpu_model else 'Disabled'}")
+
+        # Start components (but NOT scheduler yet - wait for data)
         self.system_metrics.start_collection()
         self.ntp_collector.start_collection()
-        self.predictive_scheduler.start_scheduler()
-        
+        # DON'T start scheduler yet - wait until warmup completes and we have data
+
         self.initialized = True
         logger.info("Real data pipeline initialized successfully")
-        
+
         # Wait for warm-up phase
         warm_up_duration = self.ntp_collector.warm_up_duration
         logger.info(f"Starting {warm_up_duration}s warm-up phase...")
-        
-        # In a real implementation, we'd wait for warm-up
-        # For now, mark as complete after a short delay
-        threading.Timer(5.0, self._mark_warm_up_complete).start()
-    
+        logger.info(f"Scheduler will start AFTER warmup completes to ensure sufficient data")
+
+        # Use actual warmup duration from config
+        threading.Timer(warm_up_duration, self._mark_warm_up_complete).start()
+
     def _mark_warm_up_complete(self):
-        """Mark warm-up phase as complete"""
+        """Mark warm-up phase as complete and START SCHEDULER"""
         self.warm_up_complete = True
         logger.info("Warm-up phase complete - switching to predictive mode")
+
+        # CRITICAL: Populate dataset with NTP measurements BEFORE starting scheduler
+        logger.info("Populating dataset with collected NTP measurements...")
+        self._check_for_ntp_updates(time.time())
+
+        dataset_size = len(self.dataset_manager.get_recent_measurements())
+        logger.info(f"Dataset populated with {dataset_size} NTP measurements")
+
+        if dataset_size < 10:
+            logger.warning(f"Dataset has only {dataset_size} measurements (need >= 10 for ML). "
+                          "Models may fail until more data is collected.")
+
+        # NOW start the scheduler with populated dataset
+        logger.info("Starting predictive scheduler with populated dataset...")
+        self.predictive_scheduler.start_scheduler()
+        logger.info("Predictive scheduler started - ML predictions now active")
     
     def shutdown(self):
         """Shutdown the pipeline"""
         logger.info("Shutting down real data pipeline...")
-        
+
         self.ntp_collector.stop_collection()
-        self.predictive_scheduler.stop_scheduler()
+
+        # Only stop scheduler if it was started
+        if self.warm_up_complete and self.predictive_scheduler.scheduler_running:
+            self.predictive_scheduler.stop_scheduler()
+
         self.system_metrics.stop_collection()
-        
+
         self.initialized = False
         logger.info("Real data pipeline shutdown complete")
     
@@ -483,33 +579,51 @@ class RealDataPipeline:
         # Normal operation: use predictive corrections
         return self._get_predictive_correction(current_time)
     
+    @debug_trace_pipeline(include_args=True, include_result=False, include_timing=True)
     def _check_for_ntp_updates(self, current_time: float):
-        """Check for new NTP measurements and apply retrospective correction"""
-        latest_ntp = self.ntp_collector.last_measurement
-        
-        if (latest_ntp and 
-            latest_ntp.timestamp > self.last_ntp_time and
-            self.last_ntp_time > 0):  # Not the first measurement
-            
-            # Apply retrospective correction
-            self.dataset_manager.apply_retrospective_correction(
-                latest_ntp, self.last_ntp_time
-            )
-            
-            with self.lock:
-                self.stats['retrospective_corrections'] += 1
-            
-            self.last_ntp_time = latest_ntp.timestamp
-        elif latest_ntp and self.last_ntp_time == 0:
-            # First NTP measurement
-            self.last_ntp_time = latest_ntp.timestamp
-            self.dataset_manager.add_ntp_measurement(latest_ntp)
-            
-            with self.lock:
-                self.stats['ntp_measurements'] += 1
+        """Check for new NTP measurements and add ALL of them to dataset"""
+        logger.debug(f"_check_for_ntp_updates called: current_time={current_time}, "
+                    f"last_processed_count={self.last_processed_ntp_count}")
+
+        # Get ALL recent measurements from collector (not just the last one!)
+        all_measurements = self.ntp_collector.get_recent_measurements(window_seconds=500)
+
+        logger.debug(f"NTP collector has {len(all_measurements)} total measurements, "
+                    f"already processed {self.last_processed_ntp_count}")
+
+        # Process any new measurements we haven't seen yet
+        if len(all_measurements) > self.last_processed_ntp_count:
+            new_measurements = all_measurements[self.last_processed_ntp_count:]
+            logger.info(f"Found {len(new_measurements)} new NTP measurements to add to dataset")
+
+            # Add each new measurement to the dataset
+            for timestamp, offset, uncertainty in new_measurements:
+                # Create NTPMeasurement object
+                ntp_measurement = NTPMeasurement(
+                    offset=offset,
+                    delay=0.0,  # Not stored in offset_measurements
+                    stratum=1,  # Assume good quality
+                    precision=uncertainty,
+                    server="ntp",
+                    timestamp=timestamp,
+                    uncertainty=uncertainty
+                )
+
+                self.dataset_manager.add_ntp_measurement(ntp_measurement)
+                logger.debug(f"Added NTP measurement to dataset: timestamp={timestamp}, offset={offset:.6f}s")
+
+                with self.lock:
+                    self.stats['ntp_measurements'] += 1
+
+            # Update count of processed measurements
+            self.last_processed_ntp_count = len(all_measurements)
+
+            logger.info(f"Dataset now has {len(self.dataset_manager.get_recent_measurements())} measurements")
     
+    @debug_trace_pipeline(include_args=True, include_result=True, include_timing=True)
     def _get_warm_up_correction(self, current_time: float) -> CorrectionWithBounds:
         """Get correction during warm-up phase using direct NTP measurements"""
+        logger.debug(f"_get_warm_up_correction called: current_time={current_time}, warm_up_complete={self.warm_up_complete}")
         latest_offset = self.ntp_collector.get_latest_offset()
         
         if latest_offset is not None:
@@ -527,69 +641,102 @@ class RealDataPipeline:
         else:
             return self._fallback_correction(current_time)
     
+    @debug_trace_pipeline(include_args=True, include_result=True, include_timing=True)
     def _get_predictive_correction(self, current_time: float) -> CorrectionWithBounds:
         """Get correction using predictive scheduling and model fusion"""
+        logger.info(f"[CACHE_LOOKUP] _get_predictive_correction called: current_time={current_time:.2f}")
+
+        # Log cache state BEFORE lookup
+        cache_size = len(self.predictive_scheduler.prediction_cache)
+        if cache_size > 0:
+            cache_keys = sorted(self.predictive_scheduler.prediction_cache.keys())
+            logger.info(f"[CACHE_STATE] Cache has {cache_size} entries, range: {cache_keys[0]:.0f} - {cache_keys[-1]:.0f}")
+        else:
+            logger.info(f"[CACHE_STATE] Cache is EMPTY")
+
         # Try to get fused correction from scheduler
+        logger.info(f"[CACHE_LOOKUP] Calling get_fused_correction...")
         correction = self.predictive_scheduler.get_fused_correction(current_time)
-        
+        logger.info(f"[CACHE_RESULT] get_fused_correction returned: {correction is not None}, source={correction.source if correction else None}")
+
         if correction:
             with self.lock:
                 self.stats['prediction_cache_hits'] += 1
+            logger.info(f"[CACHE_HIT] Using fused correction from cache")
+
+            # CRITICAL: Store prediction in dataset for autoregressive training
+            self.dataset_manager.add_prediction(
+                timestamp=current_time,
+                offset=correction.offset_correction,
+                drift=correction.drift_rate,
+                source=correction.source,
+                uncertainty=correction.offset_uncertainty,
+                confidence=correction.confidence
+            )
+
             return correction
-        
+
         # Fallback: get individual model predictions
+        logger.info(f"[CACHE_LOOKUP] Fused correction missed, trying get_correction_at_time...")
         cpu_correction = self.predictive_scheduler.get_correction_at_time(current_time)
+        logger.info(f"[CACHE_RESULT] get_correction_at_time returned: {cpu_correction is not None}, source={cpu_correction.source if cpu_correction else None}")
+
         if cpu_correction:
             with self.lock:
                 self.stats['prediction_cache_hits'] += 1
+            logger.info(f"[CACHE_HIT] Using CPU correction from cache")
+
+            # CRITICAL: Store prediction in dataset for autoregressive training
+            self.dataset_manager.add_prediction(
+                timestamp=current_time,
+                offset=cpu_correction.offset_correction,
+                drift=cpu_correction.drift_rate,
+                source=cpu_correction.source,
+                uncertainty=cpu_correction.offset_uncertainty,
+                confidence=cpu_correction.confidence
+            )
+
             return cpu_correction
-        
+
         # Cache miss - use fallback
         with self.lock:
             self.stats['prediction_cache_misses'] += 1
-        
+
+        logger.error(f"[CACHE_MISS] Both cache lookups failed - calling fallback (will raise RuntimeError)")
         return self._fallback_correction(current_time)
     
+    @debug_trace_pipeline(include_args=True, include_result=True, include_timing=True)
     def _fallback_correction(self, current_time: float) -> CorrectionWithBounds:
-        """Fallback correction when predictions not available"""
-        # Try to use recent NTP measurement
+        """FAIL LOUDLY - no fallbacks in research mode"""
+        logger.debug(f"_fallback_correction called: current_time={current_time}, initialized={self.initialized}")
+
+        # Get diagnostic info for error message
         latest_offset = self.ntp_collector.get_latest_offset()
-        
-        if latest_offset is not None:
-            # Calculate time since last NTP measurement
-            time_since_ntp = current_time - self.ntp_collector.last_measurement_time
-            
-            # Use simple linear extrapolation with conservative uncertainty
-            estimated_drift = 1e-6  # 1μs/s conservative drift estimate
-            extrapolated_offset = latest_offset + estimated_drift * time_since_ntp
-            
-            # Uncertainty grows with time since NTP
-            base_uncertainty = 0.005  # 5ms base
-            drift_uncertainty = time_since_ntp * 1e-6  # 1μs per second since NTP
-            total_uncertainty = base_uncertainty + drift_uncertainty
-            
-            return CorrectionWithBounds(
-                offset_correction=extrapolated_offset,
-                drift_rate=estimated_drift,
-                offset_uncertainty=total_uncertainty,
-                drift_uncertainty=1e-6,
-                prediction_time=current_time,
-                valid_until=current_time + 30,
-                confidence=max(0.1, 1.0 - time_since_ntp / 300),  # Confidence decreases with time
-                source="ntp_fallback"
-            )
-        
-        # Last resort: no correction
-        return CorrectionWithBounds(
-            offset_correction=0.0,
-            drift_rate=0.0,
-            offset_uncertainty=0.010,  # 10ms uncertainty when no data
-            drift_uncertainty=1e-5,
-            prediction_time=current_time,
-            valid_until=current_time + 10,
-            confidence=0.0,
-            source="no_data"
+        dataset_size = len(self.dataset_manager.get_recent_measurements())
+        cache_size = len(self.predictive_scheduler.prediction_cache)
+
+        # RESEARCH MODE: NO FALLBACKS - CRASH LOUDLY
+        error_msg = (
+            f"CRITICAL: ML prediction cache miss - NO FALLBACKS IN RESEARCH MODE!\n"
+            f"Time: {current_time}\n"
+            f"Initialized: {self.initialized}\n"
+            f"Warm-up complete: {self.warm_up_complete}\n"
+            f"Dataset size: {dataset_size} measurements\n"
+            f"Prediction cache size: {cache_size} entries\n"
+            f"Latest NTP offset: {latest_offset}\n"
+            f"Scheduler running: {self.predictive_scheduler.scheduler_running}\n"
+            f"\n"
+            f"REFUSING to serve NTP fallback data - this is a RESEARCH system.\n"
+            f"We need ML predictions or nothing. Crash = bug to fix, not hide.\n"
+            f"\n"
+            f"Possible causes:\n"
+            f"1. Scheduler not started yet (check warm_up_complete)\n"
+            f"2. ML model failing silently (check logs for CRITICAL errors)\n"
+            f"3. Prediction cache not being populated (check scheduler stats)\n"
+            f"4. Dataset has insufficient data for ML (need >= 10 measurements)\n"
         )
+        logger.error(error_msg)
+        raise RuntimeError(error_msg)
     
     def get_stats(self) -> dict:
         """Get pipeline statistics"""

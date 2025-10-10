@@ -1,0 +1,108 @@
+# ChronoTick Inference Configuration - Complete with all sections
+# CPU Only with Chronos - Includes clock_measurement and prediction_scheduling
+
+short_term:
+  model_name: chronos
+  device: cpu
+  enabled: true
+  inference_interval: 1.0
+  prediction_horizon: 30  # Match scheduler's CPU horizon for proper caching
+  context_length: 100
+  max_uncertainty: 0.1
+  model_params:
+    prediction_length: 30  # Match scheduler's CPU horizon
+    repo: "amazon/chronos-bolt-base"
+    size: "base"
+    multivariate: true
+
+long_term:
+  model_name: chronos
+  device: cpu
+  enabled: true
+  inference_interval: 30.0
+  prediction_horizon: 60
+  context_length: 300
+  max_uncertainty: 0.15
+  model_params:
+    prediction_length: 60
+    repo: "amazon/chronos-bolt-base"
+    size: "base"
+    multivariate: true
+
+fusion:
+  enabled: true
+  method: inverse_variance
+  uncertainty_threshold: 0.05
+  fallback_weights:
+    short_term: 0.8
+    long_term: 0.2
+
+preprocessing:
+  outlier_removal:
+    enabled: true
+    method: iqr
+    threshold: 2.0
+  missing_value_handling:
+    enabled: true
+    method: interpolate
+  normalization:
+    enabled: false
+    method: zscore
+
+covariates:
+  enabled: true
+  variables:
+    - cpu_usage
+    - temperature
+    - memory_usage
+  future_variables: []
+
+performance:
+  max_memory_mb: 2048
+  model_timeout: 10.0
+  cache_size: 5
+  batch_size: 1
+
+logging:
+  level: DEBUG
+  log_predictions: true
+  log_uncertainty: true
+  log_fusion_weights: true
+
+clock:
+  frequency_type: second
+  frequency_code: 9
+
+# Clock measurement via NTP - Required by ClockMeasurementCollector
+clock_measurement:
+  ntp:
+    servers:
+      - pool.ntp.org
+      - time.nist.gov
+      - time.google.com
+    timeout_seconds: 2.0
+    max_acceptable_uncertainty: 0.100
+    min_stratum: 1
+    max_stratum: 16
+  timing:
+    warm_up:
+      duration_seconds: 60
+      measurement_interval: 5
+    normal_operation:
+      measurement_interval: 180
+
+# Prediction scheduling - Required by PredictiveScheduler
+prediction_scheduling:
+  dataset:
+    prediction_cache_size: 100
+    max_history_size: 1000
+  cpu_model:
+    prediction_interval: 5  # Reduced from 1s to reduce GIL contention
+    prediction_horizon: 30
+    prediction_lead_time: 5
+    max_inference_time: 2.0
+  gpu_model:
+    prediction_interval: 30
+    prediction_horizon: 240
+    prediction_lead_time: 10
+    max_inference_time: 5.0

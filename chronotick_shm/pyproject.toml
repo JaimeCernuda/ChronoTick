@@ -1,0 +1,39 @@
+[project]
+name = "chronotick-shm"
+version = "0.1.0"
+description = "ChronoTick Shared Memory - Ultra-low latency time synchronization"
+requires-python = ">=3.10"
+dependencies = [
+    "claude-agent-sdk>=0.1.0",
+    "fastmcp>=0.1.0",
+    "psutil>=5.9.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+]
+
+[project.scripts]
+# Daemon Server - writes to shared memory
+chronotick-daemon = "chronotick_shm.chronotick_daemon_server:main"
+
+# Evaluation Client - reads and benchmarks
+chronotick-client = "chronotick_shm.chronotick_client_eval:main"
+
+# Stdio MCP Server - standalone server (fastmcp)
+chronotick-stdio-server = "chronotick_shm.chronotick_stdio_mcp:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatchling.build.targets.wheel]
+packages = ["src/chronotick_shm"]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+]

@@ -494,7 +494,7 @@ class ChronoTickMCPServer:
             
             # Wait for response with timeout
             try:
-                response = self.response_queue.get(timeout=0.1)  # 100ms timeout for fast response
+                response = self.response_queue.get(timeout=0.3)  # 300ms timeout to handle GIL contention
                 
                 if response["type"] == "correction":
                     # Reconstruct CorrectionWithBounds from response data
@@ -522,8 +522,8 @@ class ChronoTickMCPServer:
             self.request_queue.put({"type": "get_status", "timestamp": time.time()})
             
             try:
-                response = self.response_queue.get(timeout=0.1)
-                
+                response = self.response_queue.get(timeout=0.3)  # 300ms timeout to handle GIL contention
+
                 if response["type"] == "status":
                     return DaemonStatus(**response["data"])
                 else:

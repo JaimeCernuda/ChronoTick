@@ -353,11 +353,31 @@ class ChronoTickDaemon:
                 return
             
             logger.info("Inference engine initialized successfully")
-            
+
             # Initialize real data pipeline (replaces synthetic ClockDataGenerator)
             logger.info("Initializing real data pipeline...")
             real_data_pipeline = RealDataPipeline(config_path)
-            real_data_pipeline.initialize()
+
+            # Create model wrappers to bridge engine to pipeline
+            from chronotick_inference.tsfm_model_wrapper import create_model_wrappers
+            logger.info("Creating TSFM model wrappers...")
+            cpu_wrapper, gpu_wrapper = create_model_wrappers(
+                inference_engine=engine,
+                dataset_manager=real_data_pipeline.dataset_manager,
+                system_metrics=real_data_pipeline.system_metrics
+            )
+
+            # Initialize pipeline with models
+            logger.info("Connecting ML models to pipeline...")
+            real_data_pipeline.initialize(cpu_model=cpu_wrapper, gpu_model=gpu_wrapper)
+
+            # Set model interfaces on predictive scheduler
+            logger.info("Setting up predictive scheduler...")
+            real_data_pipeline.predictive_scheduler.set_model_interfaces(
+                cpu_model=cpu_wrapper,
+                gpu_model=gpu_wrapper,
+                fusion_engine=real_data_pipeline.fusion_engine
+            )
             
             # State management
             offset_history = []
@@ -536,11 +556,55 @@ class ChronoTickDaemon:
                 logger.warning(f"Failed to set CPU affinity: {e}")
         
         try:
-            # Initialize real data pipeline
+            # STEP 1: Initialize inference engine with ML models
+            logger.info("Initializing ChronoTick inference engine with ML models...")
+            status_queue.put({"status": "initializing_models"})
+
+            from chronotick_inference.engine import ChronoTickInferenceEngine
+            from chronotick_inference.tsfm_model_wrapper import create_model_wrappers
+
+            inference_engine = ChronoTickInferenceEngine(self.config_path)
+            success = inference_engine.initialize_models()
+
+            if not success:
+                logger.error("Failed to initialize ML models!")
+                status_queue.put({"status": "error", "error": "Model initialization failed"})
+                return
+
+            logger.info("✓ ML models initialized successfully")
+
+            # STEP 2: Initialize real data pipeline (NTP, dataset, metrics)
             logger.info("Initializing ChronoTick real data pipeline...")
-            status_queue.put({"status": "initializing"})
-            
+            status_queue.put({"status": "initializing_pipeline"})
+
             real_data_pipeline = RealDataPipeline(self.config_path)
+
+            # STEP 3: Create model wrappers to bridge engine to pipeline
+            logger.info("Creating TSFM model wrappers...")
+            cpu_wrapper, gpu_wrapper = create_model_wrappers(
+                inference_engine=inference_engine,
+                dataset_manager=real_data_pipeline.dataset_manager,
+                system_metrics=real_data_pipeline.system_metrics
+            )
+
+            # STEP 4: Initialize pipeline with models
+            logger.info("Connecting ML models to pipeline...")
+            real_data_pipeline.initialize(cpu_model=cpu_wrapper, gpu_model=gpu_wrapper)
+
+            # STEP 5: Set model interfaces on predictive scheduler
+            logger.info("Setting up predictive scheduler...")
+            real_data_pipeline.predictive_scheduler.set_model_interfaces(
+                cpu_model=cpu_wrapper,
+                gpu_model=gpu_wrapper,
+                fusion_engine=real_data_pipeline.fusion_engine
+            )
+
+            logger.info("✓ Full ChronoTick integration complete!")
+            logger.info("  - Real NTP measurements: ACTIVE")
+            logger.info("  - ML clock drift prediction: ACTIVE")
+            logger.info("  - System metrics (covariates): ACTIVE")
+            logger.info("  - Dual-model architecture: ACTIVE")
+            logger.info("  - Prediction fusion: ACTIVE")
             
             # Start warmup phase
             logger.info("Starting warmup phase...")

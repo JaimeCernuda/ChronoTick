@@ -297,7 +297,14 @@ class ClockMeasurementCollector:
         """Load configuration from YAML file"""
         try:
             with open(config_path, 'r') as f:
-                return yaml.safe_load(f)
+                config = yaml.safe_load(f)
+
+            # DEBUG: Log what we actually loaded
+            logger.info(f"ClockMeasurementCollector loaded config from: {config_path}")
+            logger.info(f"Config keys found: {list(config.keys())}")
+            logger.info(f"Has clock_measurement: {'clock_measurement' in config}")
+
+            return config
         except Exception as e:
             logger.error(f"Failed to load config {config_path}: {e}")
             raise

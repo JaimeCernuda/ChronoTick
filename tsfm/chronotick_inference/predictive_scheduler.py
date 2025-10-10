@@ -122,7 +122,14 @@ class PredictiveScheduler:
         """Load configuration from YAML file"""
         try:
             with open(config_path, 'r') as f:
-                return yaml.safe_load(f)
+                config = yaml.safe_load(f)
+
+            # DEBUG: Log what we actually loaded
+            logger.info(f"PredictiveScheduler loaded config from: {config_path}")
+            logger.info(f"Config keys found: {list(config.keys())}")
+            logger.info(f"Has prediction_scheduling: {'prediction_scheduling' in config}")
+
+            return config
         except Exception as e:
             logger.error(f"Failed to load config {config_path}: {e}")
             raise
@@ -160,24 +167,27 @@ class PredictiveScheduler:
         while self.scheduler_running:
             try:
                 current_time = time.time()
-                
+
+                # Get ready tasks (with lock)
+                tasks_to_execute = []
                 with self.lock:
-                    # Execute all ready tasks
                     while self.task_queue and self.task_queue[0].execution_time <= current_time:
                         task = heapq.heappop(self.task_queue)
-                        
-                        try:
-                            # Execute the prediction task
-                            logger.debug(f"Executing prediction task: {task.task_id}")
-                            task.task_function(*task.args, **task.kwargs)
-                            self.stats['predictions_completed'] += 1
-                            
-                        except Exception as e:
-                            logger.error(f"Prediction task {task.task_id} failed: {e}")
-                
+                        tasks_to_execute.append(task)
+
+                # Execute tasks (without lock to avoid deadlock)
+                for task in tasks_to_execute:
+                    try:
+                        # Execute the prediction task
+                        logger.debug(f"Executing prediction task: {task.task_id}")
+                        task.task_function(*task.args, **task.kwargs)
+
+                    except Exception as e:
+                        logger.error(f"Prediction task {task.task_id} failed: {e}")
+
                 # Small sleep to avoid busy waiting
                 time.sleep(0.1)
-                
+
             except Exception as e:
                 logger.error(f"Scheduler loop error: {e}")
                 time.sleep(1.0)
@@ -237,46 +247,50 @@ class PredictiveScheduler:
     def _execute_cpu_prediction(self, start_time: float, end_time: float):
         """Execute CPU model prediction and cache results"""
         try:
+            logger.info(f"[SCHEDULER_TASK] _execute_cpu_prediction ENTRY: start_time={start_time:.0f}, end_time={end_time:.0f}, cpu_model={self.cpu_model is not None}")
             if not self.cpu_model:
-                logger.error("CPU model not available")
+                logger.error("[SCHEDULER_TASK] CPU model not available")
                 return
-                
-            logger.debug(f"Executing CPU prediction for t={start_time}-{end_time}")
-            
+
+            logger.info(f"[SCHEDULER_TASK] Executing CPU prediction for t={start_time:.0f}-{end_time:.0f}")
+
             # Make CPU prediction
-            cpu_prediction = self.cpu_model.predict_with_uncertainty(
-                horizon=int(end_time - start_time)
-            )
-            
+            horizon = int(end_time - start_time)
+            logger.info(f"[SCHEDULER_TASK] Calling cpu_model.predict_with_uncertainty(horizon={horizon})")
+            cpu_prediction = self.cpu_model.predict_with_uncertainty(horizon=horizon)
+            logger.info(f"[SCHEDULER_TASK] CPU model returned {len(cpu_prediction) if cpu_prediction else 0} predictions")
+
             # Cache prediction for each time step
             for i, pred in enumerate(cpu_prediction):
                 timestamp = start_time + i
-                
+
                 correction = CorrectionWithBounds(
                     offset_correction=pred.offset,
                     drift_rate=pred.drift,
                     offset_uncertainty=pred.offset_uncertainty,
                     drift_uncertainty=pred.drift_uncertainty,
-                    prediction_time=time.time(),
+                    prediction_time=timestamp,  # Time this prediction is FOR, not when cached
                     valid_until=end_time,
                     confidence=pred.confidence,
                     source="cpu"
                 )
-                
+
                 self._cache_prediction(timestamp, correction)
-            
+
             # Update stats
             with self.lock:
                 self.stats['predictions_completed'] += 1
-            
-            # Schedule next CPU prediction
-            next_target = start_time + self.cpu_interval
-            self._schedule_cpu_prediction(next_target)
-            
+
         except Exception as e:
             logger.error(f"CPU prediction execution failed: {e}")
             with self.lock:
                 self.stats['late_predictions'] += 1
+
+        finally:
+            # CRITICAL: Schedule next CPU prediction even if this one failed
+            # This prevents the self-scheduling chain from breaking
+            next_target = start_time + self.cpu_interval
+            self._schedule_cpu_prediction(next_target)
     
     def _execute_gpu_prediction(self, start_time: float, end_time: float):
         """Execute GPU model prediction and cache results"""
@@ -284,121 +298,150 @@ class PredictiveScheduler:
             if not self.gpu_model:
                 logger.error("GPU model not available")
                 return
-                
+
             logger.debug(f"Executing GPU prediction for t={start_time}-{end_time}")
-            
+
             # Make GPU prediction
             gpu_prediction = self.gpu_model.predict_with_uncertainty(
                 horizon=int(end_time - start_time)
             )
-            
+
             # Cache prediction for each time step
             for i, pred in enumerate(gpu_prediction):
                 timestamp = start_time + i
-                
+
                 correction = CorrectionWithBounds(
                     offset_correction=pred.offset,
                     drift_rate=pred.drift,
                     offset_uncertainty=pred.offset_uncertainty,
                     drift_uncertainty=pred.drift_uncertainty,
-                    prediction_time=time.time(),
+                    prediction_time=timestamp,  # Time this prediction is FOR, not when cached
                     valid_until=end_time,
                     confidence=pred.confidence,
                     source="gpu"
                 )
-                
+
                 self._cache_prediction(timestamp, correction)
-            
+
             # Update stats
             with self.lock:
                 self.stats['predictions_completed'] += 1
-            
-            # Schedule next GPU prediction
-            next_target = start_time + self.gpu_interval
-            self._schedule_gpu_prediction(next_target)
-            
+
         except Exception as e:
             logger.error(f"GPU prediction execution failed: {e}")
             with self.lock:
                 self.stats['late_predictions'] += 1
+
+        finally:
+            # CRITICAL: Schedule next GPU prediction even if this one failed
+            # This prevents the self-scheduling chain from breaking
+            next_target = start_time + self.gpu_interval
+            self._schedule_gpu_prediction(next_target)
     
     def _cache_prediction(self, timestamp: float, correction: CorrectionWithBounds):
         """Cache prediction with size management"""
+        logger.info(f"[SCHEDULER_CACHE] Caching prediction: timestamp={timestamp:.0f}, source={correction.source}, offset={correction.offset_correction*1000:.2f}ms")
         with self.lock:
             self.prediction_cache[timestamp] = correction
-            
-            # Manage cache size
+
+            # Manage cache size - keep predictions around CURRENT time, not furthest future
             if len(self.prediction_cache) > self.cache_size:
-                # Remove oldest entries
-                sorted_keys = sorted(self.prediction_cache.keys())
-                keys_to_remove = sorted_keys[:-self.cache_size]
+                current_time = time.time()
+
+                # Sort keys by distance from current time
+                sorted_keys = sorted(
+                    self.prediction_cache.keys(),
+                    key=lambda t: abs(t - current_time)
+                )
+
+                # Keep the closest N entries to current time
+                keys_to_keep = set(sorted_keys[:self.cache_size])
+                keys_to_remove = [k for k in self.prediction_cache.keys() if k not in keys_to_keep]
+
                 for key in keys_to_remove:
                     del self.prediction_cache[key]
+
+                logger.info(f"[SCHEDULER_CACHE] Cache trimmed: removed {len(keys_to_remove)} entries far from current time ({current_time:.0f})")
     
     def get_correction_at_time(self, current_time: float) -> Optional[CorrectionWithBounds]:
         """
         Get correction for current time - should be immediately available
         from pre-computed predictions
         """
+        logger.info(f"[SCHEDULER] get_correction_at_time called: current_time={current_time:.2f}")
         timestamp = math.floor(current_time)  # Round to nearest second
-        
+        logger.info(f"[SCHEDULER] Rounded timestamp: {timestamp}, cache_size={len(self.prediction_cache)}")
+
         with self.lock:
             # Check cache for exact match
             if timestamp in self.prediction_cache:
                 correction = self.prediction_cache[timestamp]
+                logger.info(f"[SCHEDULER] Found exact match at timestamp={timestamp}, valid={correction.is_valid(current_time)}, source={correction.source}")
                 if correction.is_valid(current_time):
                     self.stats['cache_hits'] += 1
                     return correction
-            
+
             # Check for nearby cached predictions
+            logger.info(f"[SCHEDULER] No exact match, checking nearby timestamps...")
             for offset in [-1, 0, 1, 2]:  # Check nearby seconds
                 check_time = timestamp + offset
                 if check_time in self.prediction_cache:
                     correction = self.prediction_cache[check_time]
+                    logger.info(f"[SCHEDULER] Found nearby match at timestamp={check_time}, valid={correction.is_valid(current_time)}, source={correction.source}")
                     if correction.is_valid(current_time):
                         self.stats['cache_hits'] += 1
                         return correction
-            
+
             # Cache miss - this shouldn't happen with proper scheduling
             self.stats['cache_misses'] += 1
-            logger.warning(f"Cache miss for t={current_time} - prediction not ready")
+            cache_keys = sorted(self.prediction_cache.keys())
+            cache_range = f"{cache_keys[0]:.0f} - {cache_keys[-1]:.0f}" if cache_keys else "EMPTY"
+            logger.warning(f"[SCHEDULER] Cache miss for t={current_time:.2f} (timestamp={timestamp}). Cache range: {cache_range}, looking for: {timestamp}")
             return None
     
     def get_fused_correction(self, current_time: float) -> Optional[CorrectionWithBounds]:
         """
         Get fused CPU+GPU correction with temporal weighting
         """
+        logger.info(f"[SCHEDULER] get_fused_correction called: current_time={current_time:.2f}")
         timestamp = math.floor(current_time)
-        
+        logger.info(f"[SCHEDULER] Fused correction timestamp: {timestamp}, cache_size={len(self.prediction_cache)}")
+
         with self.lock:
             cpu_correction = None
             gpu_correction = None
-            
+
             # Find CPU and GPU predictions for this time
             for ts, correction in self.prediction_cache.items():
                 if abs(ts - timestamp) <= 1 and correction.is_valid(current_time):
                     if correction.source == "cpu":
                         cpu_correction = correction
+                        logger.info(f"[SCHEDULER] Found CPU correction at ts={ts}")
                     elif correction.source == "gpu":
                         gpu_correction = correction
-            
+                        logger.info(f"[SCHEDULER] Found GPU correction at ts={ts}")
+
             # Apply fusion if both available
+            logger.info(f"[SCHEDULER] Fusion check: cpu={cpu_correction is not None}, gpu={gpu_correction is not None}, fusion_engine={self.fusion_engine is not None}")
             if cpu_correction and gpu_correction and self.fusion_engine:
+                logger.info("[SCHEDULER] Applying fusion of CPU and GPU predictions")
                 # Calculate temporal weights based on CPU prediction window
                 cpu_window_start = timestamp - (timestamp % self.cpu_interval)
                 time_in_window = timestamp - cpu_window_start
                 cpu_progress = min(time_in_window / self.cpu_interval, 1.0)
-                
+
                 # Progressive weighting: start CPU-heavy, move to GPU-heavy
                 cpu_weight = 1.0 - cpu_progress
                 gpu_weight = cpu_progress
-                
+
                 return self.fusion_engine.fuse_predictions(
                     cpu_correction, gpu_correction, cpu_weight, gpu_weight
                 )
-            
+
             # Fallback to available prediction
-            return cpu_correction or gpu_correction
+            result = cpu_correction or gpu_correction
+            logger.info(f"[SCHEDULER] Returning fallback prediction: {result.source if result else None}")
+            return result
     
     def get_stats(self) -> dict:
         """Get scheduler statistics"""

@@ -407,24 +407,26 @@ def time_detailed() -> CorrectedTime:
     """
     return _chronotick.time_detailed()
 
-def start(config_path: Optional[str] = None, 
-          cpu_affinity: Optional[list] = None) -> bool:
+def start(config_path: Optional[str] = None,
+          cpu_affinity: Optional[list] = None,
+          auto_config: bool = True) -> bool:
     """
     Start ChronoTick inference daemon.
-    
+
     Args:
         config_path: Path to configuration file (auto-selected if None)
         cpu_affinity: CPU cores to bind to (auto-selected if None)
-        
+        auto_config: Automatically select optimal configuration (default True)
+
     Returns:
         True if started successfully
-        
+
     Example:
         >>> import chronotick
         >>> chronotick.start(cpu_affinity=[1, 2])
         >>> # Now chronotick.time() returns corrected timestamps
     """
-    return _chronotick.start(config_path, cpu_affinity)
+    return _chronotick.start(config_path, cpu_affinity, auto_config)
 
 def stop() -> bool:
     """
