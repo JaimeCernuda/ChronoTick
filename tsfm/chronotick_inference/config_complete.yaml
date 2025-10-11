@@ -106,3 +106,12 @@ prediction_scheduling:
     prediction_horizon: 240
     prediction_lead_time: 10
     max_inference_time: 5.0
+
+  # NTP Correction - Blend ML predictions with NTP measurements
+  ntp_correction:
+    enabled: true  # Enable real-time NTP correction
+    method: inverse_variance  # Weighting method: inverse_variance, linear, exponential
+    max_ntp_age_seconds: 300  # Don't use NTP measurements older than 5 minutes
+    min_ntp_confidence: 0.5  # Minimum confidence to use NTP correction
+    # Uncertainty growth rate: how much uncertainty increases per second since NTP
+    uncertainty_growth_rate: 0.00001  # 10 μs/s (conservative)

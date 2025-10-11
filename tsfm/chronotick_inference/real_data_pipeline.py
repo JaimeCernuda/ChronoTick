@@ -444,21 +444,36 @@ class RealDataPipeline:
         
         fusion_config = config.get('prediction_scheduling', {}).get('fusion', {})
         self.fusion_engine = PredictionFusionEngine(fusion_config)
-        
+
+        # NTP Correction Configuration
+        ntp_correction_config = config.get('prediction_scheduling', {}).get('ntp_correction', {})
+        self.ntp_correction_enabled = ntp_correction_config.get('enabled', True)
+        self.ntp_correction_method = ntp_correction_config.get('method', 'inverse_variance')
+        self.max_ntp_age = ntp_correction_config.get('max_ntp_age_seconds', 300)
+        self.min_ntp_confidence = ntp_correction_config.get('min_ntp_confidence', 0.5)
+        self.ntp_uncertainty_growth_rate = ntp_correction_config.get('uncertainty_growth_rate', 0.00001)
+
+        logger.info(f"NTP Correction: enabled={self.ntp_correction_enabled}, "
+                   f"method={self.ntp_correction_method}, max_age={self.max_ntp_age}s")
+
         # Pipeline state
         self.initialized = False
         self.last_ntp_time = 0
+        self.last_ntp_offset = None
+        self.last_ntp_uncertainty = None
         self.last_processed_ntp_count = 0  # Track how many NTP measurements we've processed
         self.warm_up_complete = False
         self.lock = threading.Lock()
-        
+
         # Statistics
         self.stats = {
             'total_corrections': 0,
             'ntp_measurements': 0,
             'prediction_cache_hits': 0,
             'prediction_cache_misses': 0,
-            'retrospective_corrections': 0
+            'retrospective_corrections': 0,
+            'ntp_corrections_applied': 0,
+            'ntp_corrections_skipped': 0
         }
         
     def initialize(self, cpu_model=None, gpu_model=None):
@@ -612,20 +627,119 @@ class RealDataPipeline:
                 self.dataset_manager.add_ntp_measurement(ntp_measurement)
                 logger.debug(f"Added NTP measurement to dataset: timestamp={timestamp}, offset={offset:.6f}s")
 
+                # Track latest NTP for real-time correction
                 with self.lock:
                     self.stats['ntp_measurements'] += 1
+                    self.last_ntp_time = timestamp
+                    self.last_ntp_offset = offset
+                    self.last_ntp_uncertainty = uncertainty
 
             # Update count of processed measurements
             self.last_processed_ntp_count = len(all_measurements)
 
             logger.info(f"Dataset now has {len(self.dataset_manager.get_recent_measurements())} measurements")
+            logger.info(f"Latest NTP: t={self.last_ntp_time:.0f}, offset={self.last_ntp_offset*1000:.2f}ms")
     
+    def _apply_ntp_correction(self, ml_correction: CorrectionWithBounds, current_time: float) -> CorrectionWithBounds:
+        """
+        Blend ML prediction with latest NTP measurement using inverse-variance weighting.
+
+        Args:
+            ml_correction: ML model prediction
+            current_time: Current timestamp
+
+        Returns:
+            Blended correction combining ML and NTP
+        """
+        if not self.ntp_correction_enabled:
+            with self.lock:
+                self.stats['ntp_corrections_skipped'] += 1
+            return ml_correction
+
+        with self.lock:
+            last_ntp_time = self.last_ntp_time
+            last_ntp_offset = self.last_ntp_offset
+            last_ntp_uncertainty = self.last_ntp_uncertainty
+
+        # Check if we have NTP data
+        if last_ntp_offset is None or last_ntp_time == 0:
+            logger.debug("[NTP_CORRECTION] No NTP data available, using ML-only prediction")
+            with self.lock:
+                self.stats['ntp_corrections_skipped'] += 1
+            return ml_correction
+
+        # Check NTP age
+        ntp_age = current_time - last_ntp_time
+        if ntp_age > self.max_ntp_age:
+            logger.debug(f"[NTP_CORRECTION] NTP too old ({ntp_age:.1f}s > {self.max_ntp_age}s), using ML-only")
+            with self.lock:
+                self.stats['ntp_corrections_skipped'] += 1
+            return ml_correction
+
+        # Calculate NTP uncertainty with growth over time
+        # NTP uncertainty grows as we get further from measurement
+        ntp_uncertainty_now = last_ntp_uncertainty + (ntp_age * self.ntp_uncertainty_growth_rate)
+
+        # Inverse-variance weighting: w_i = 1/σ_i²
+        ml_variance = ml_correction.offset_uncertainty ** 2
+        ntp_variance = ntp_uncertainty_now ** 2
+
+        ml_weight = 1.0 / ml_variance if ml_variance > 0 else 0
+        ntp_weight = 1.0 / ntp_variance if ntp_variance > 0 else 0
+
+        total_weight = ml_weight + ntp_weight
+
+        if total_weight == 0:
+            logger.warning("[NTP_CORRECTION] Both weights are zero, using ML-only")
+            with self.lock:
+                self.stats['ntp_corrections_skipped'] += 1
+            return ml_correction
+
+        # Normalized weights
+        ml_normalized = ml_weight / total_weight
+        ntp_normalized = ntp_weight / total_weight
+
+        # Blended offset: weighted average of ML and NTP
+        blended_offset = (ml_normalized * ml_correction.offset_correction +
+                         ntp_normalized * last_ntp_offset)
+
+        # Blended uncertainty: 1/sqrt(total_inverse_variance)
+        blended_uncertainty = 1.0 / math.sqrt(total_weight)
+
+        # Keep ML drift rate (NTP doesn't provide drift information)
+        blended_drift = ml_correction.drift_rate
+        blended_drift_unc = ml_correction.drift_uncertainty
+
+        # Calculate confidence based on agreement between ML and NTP
+        offset_diff = abs(ml_correction.offset_correction - last_ntp_offset)
+        combined_unc = ml_correction.offset_uncertainty + ntp_uncertainty_now
+        agreement = 1.0 - min(offset_diff / (combined_unc + 1e-9), 1.0)  # 1.0 = perfect agreement
+        blended_confidence = min(ml_correction.confidence, 0.5 + 0.5 * agreement)
+
+        logger.info(f"[NTP_CORRECTION] Applied: ML={ml_correction.offset_correction*1000:.2f}ms (unc={ml_correction.offset_uncertainty*1000:.2f}ms, w={ml_normalized:.3f}), "
+                   f"NTP={last_ntp_offset*1000:.2f}ms (unc={ntp_uncertainty_now*1000:.2f}ms, w={ntp_normalized:.3f}, age={ntp_age:.1f}s), "
+                   f"Blended={blended_offset*1000:.2f}ms (unc={blended_uncertainty*1000:.2f}ms, conf={blended_confidence:.2f})")
+
+        with self.lock:
+            self.stats['ntp_corrections_applied'] += 1
+
+        return CorrectionWithBounds(
+            offset_correction=blended_offset,
+            drift_rate=blended_drift,
+            offset_uncertainty=blended_uncertainty,
+            drift_uncertainty=blended_drift_unc,
+            prediction_time=current_time,
+            valid_until=ml_correction.valid_until,
+            confidence=blended_confidence,
+            source=f"{ml_correction.source}+ntp"
+        )
+
     @debug_trace_pipeline(include_args=True, include_result=True, include_timing=True)
     def _get_warm_up_correction(self, current_time: float) -> CorrectionWithBounds:
         """Get correction during warm-up phase using direct NTP measurements"""
         logger.debug(f"_get_warm_up_correction called: current_time={current_time}, warm_up_complete={self.warm_up_complete}")
         latest_offset = self.ntp_collector.get_latest_offset()
-        
+
         if latest_offset is not None:
             # Use latest NTP measurement with conservative uncertainty
             return CorrectionWithBounds(
@@ -664,17 +778,20 @@ class RealDataPipeline:
                 self.stats['prediction_cache_hits'] += 1
             logger.info(f"[CACHE_HIT] Using fused correction from cache")
 
+            # Apply NTP correction to blend ML prediction with latest NTP
+            corrected = self._apply_ntp_correction(correction, current_time)
+
             # CRITICAL: Store prediction in dataset for autoregressive training
             self.dataset_manager.add_prediction(
                 timestamp=current_time,
-                offset=correction.offset_correction,
-                drift=correction.drift_rate,
-                source=correction.source,
-                uncertainty=correction.offset_uncertainty,
-                confidence=correction.confidence
+                offset=corrected.offset_correction,
+                drift=corrected.drift_rate,
+                source=corrected.source,
+                uncertainty=corrected.offset_uncertainty,
+                confidence=corrected.confidence
             )
 
-            return correction
+            return corrected
 
         # Fallback: get individual model predictions
         logger.info(f"[CACHE_LOOKUP] Fused correction missed, trying get_correction_at_time...")
@@ -686,17 +803,20 @@ class RealDataPipeline:
                 self.stats['prediction_cache_hits'] += 1
             logger.info(f"[CACHE_HIT] Using CPU correction from cache")
 
+            # Apply NTP correction to blend ML prediction with latest NTP
+            corrected = self._apply_ntp_correction(cpu_correction, current_time)
+
             # CRITICAL: Store prediction in dataset for autoregressive training
             self.dataset_manager.add_prediction(
                 timestamp=current_time,
-                offset=cpu_correction.offset_correction,
-                drift=cpu_correction.drift_rate,
-                source=cpu_correction.source,
-                uncertainty=cpu_correction.offset_uncertainty,
-                confidence=cpu_correction.confidence
+                offset=corrected.offset_correction,
+                drift=corrected.drift_rate,
+                source=corrected.source,
+                uncertainty=corrected.offset_uncertainty,
+                confidence=corrected.confidence
             )
 
-            return cpu_correction
+            return corrected
 
         # Cache miss - use fallback
         with self.lock:
