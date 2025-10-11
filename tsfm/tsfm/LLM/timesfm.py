@@ -48,7 +48,7 @@ class TimesFMModel(BaseTimeSeriesModel):
     def __init__(self, model_name: str = "timesfm", device: str = "cpu", **kwargs):
         super().__init__(model_name, device, **kwargs)
         
-        # TimesFM 2.5 specific configuration - NEW API with continuous quantile head
+        # TimesFM 2.5 specific configuration
         self.model_repo = kwargs.get('model_repo', 'google/timesfm-2.5-200m-pytorch')
         self.context_len = kwargs.get('context_len', 2048)  # 4x increase
         self.horizon_len = kwargs.get('horizon_len', 'flexible')  # Flexible at API level
@@ -75,16 +75,16 @@ class TimesFMModel(BaseTimeSeriesModel):
     def _check_dependencies(self) -> bool:
         """Check if required dependencies are available."""
         try:
-            from transformers.models.timesfm import TimesFmModelForPrediction
+            import timesfm
             import torch
             return True
         except ImportError as e:
-            self._dependency_error = f"TimesFM dependencies not available: {e}. Install with: pip install transformers torch"
+            self._dependency_error = f"TimesFM dependencies not available: {e}. Install with: pip install timesfm torch"
             return False
 
     @debug_log_call
     def load_model(self) -> None:
-        """Load the TimesFM 2.5 model using the transformers API."""
+        """Load the TimesFM 2.5 model using the official timesfm package."""
         try:
             debug_log_section("TimesFM 2.5 Model Loading")
             logger.info(f"Loading TimesFM 2.5 model from {self.model_repo}...")
@@ -95,29 +95,44 @@ class TimesFMModel(BaseTimeSeriesModel):
                 self.status = ModelStatus.ERROR
                 raise RuntimeError(self._dependency_error)
 
-            from transformers.models.timesfm import TimesFmModelForPrediction
+            import timesfm
             import torch
 
-            # TimesFM 2.5 via transformers: TimesFmModelForPrediction.from_pretrained()
-            logger.info("Using TimesFM 2.5 via transformers API")
-            self.tfm = TimesFmModelForPrediction.from_pretrained(
+            # TimesFM 2.5 API: from_pretrained + compile
+            logger.info("Using TimesFM 2.5 via official timesfm package")
+            logger.info(f"Config: context_len={self.context_len}, device={self.device}")
+
+            # Load model with from_pretrained
+            # torch_compile is disabled for CPU for compatibility
+            torch_compile_enabled = (self.device != "cpu")
+            self.tfm = timesfm.TimesFM_2p5_200M_torch.from_pretrained(
                 self.model_repo,
-                torch_dtype=torch.float32,
-                device_map=self.device if self.device != 'cpu' else None
+                torch_compile=torch_compile_enabled
             )
 
-            # Move to device if CPU
-            if self.device == 'cpu':
-                self.tfm = self.tfm.cpu()
+            # Get config values with defaults
+            max_context = min(self.context_len, 2048)  # TimesFM 2.5 max
+            max_horizon = 256  # TimesFM 2.5 default max horizon
 
-            # Set to evaluation mode
-            self.tfm.eval()
+            # Compile with ForecastConfig using config values
+            forecast_config = timesfm.ForecastConfig(
+                max_context=max_context,
+                max_horizon=max_horizon,
+                normalize_inputs=True,
+                use_continuous_quantile_head=True,
+                force_flip_invariance=True,
+                infer_is_positive=False,  # Time offsets can be negative
+                fix_quantile_crossing=True,
+            )
+            self.tfm.compile(forecast_config)
+
+            logger.info(f"ForecastConfig: max_context={max_context}, max_horizon={max_horizon}")
 
             logger.info(f"TimesFM 2.5 model loaded successfully:")
             logger.info(f"  Model repo: {self.model_repo}")
             logger.info(f"  Device: {self.device}")
             logger.info(f"  Context length: {self.context_len}")
-            logger.info(f"  Horizon length: {self.horizon_len}")
+            logger.info(f"  Max horizon: 256")
 
             self.status = ModelStatus.LOADED
 
@@ -193,43 +208,48 @@ class TimesFMModel(BaseTimeSeriesModel):
 
             logger.debug(f"Context min: {context_1d.min():.6f}, max: {context_1d.max():.6f}, mean: {context_1d.mean():.6f}")
 
-            # Convert to torch tensor
-            context_tensor = torch.tensor(context_1d, dtype=torch.float32)
+            # TimesFM 2.5 API: model.forecast(horizon=, inputs=)
+            # inputs: list of numpy arrays
+            # Returns: (point_forecast, quantile_forecast)
+            logger.debug(f"Calling TimesFM 2.5 with context shape: {context_1d.shape}, horizon: {horizon}")
 
-            # TimesFM 2.5 transformers API: model(past_values=[tensor], freq=[int])
-            # Returns: TimesFmOutputForPrediction with mean_predictions and full_predictions
-            # mean_predictions shape: (batch, horizon)
-            # full_predictions shape: (batch, horizon, 10) - mean + quantiles
-            logger.debug(f"Calling TimesFM model with past_values shape: {context_tensor.shape}, freq: {freq}")
-            with torch.no_grad():
-                output = self.tfm(
-                    past_values=[context_tensor],
-                    freq=[freq]
-                )
-            logger.debug(f"TimesFM model returned output successfully")
+            # TimesFM 2.5 forecast method
+            point_forecast, quantile_forecast = self.tfm.forecast(
+                horizon=horizon,
+                inputs=[context_1d]  # List of numpy arrays
+            )
+
+            logger.debug(f"TimesFM 2.5 returned forecasts successfully")
 
             # Extract predictions from output
-            # mean_predictions has shape (1, default_horizon) - usually 128
-            if output.mean_predictions is not None:
-                mean_preds = output.mean_predictions[0].cpu().numpy()
-                predictions = mean_preds[:horizon]  # Truncate to requested horizon
-                logger.debug(f"Got {len(mean_preds)} predictions from model, using first {horizon}")
+            # point_forecast is a list/array of predictions
+            if isinstance(point_forecast, list) and len(point_forecast) > 0:
+                predictions = np.array(point_forecast[0])[:horizon]
+            elif isinstance(point_forecast, np.ndarray):
+                if point_forecast.ndim > 1:
+                    predictions = point_forecast[0][:horizon]
+                else:
+                    predictions = point_forecast[:horizon]
             else:
-                raise ValueError("TimesFM model returned no mean_predictions")
+                raise ValueError(f"Unexpected point_forecast format: {type(point_forecast)}")
 
-            # Extract quantiles from full_predictions if available
-            # full_predictions shape: (1, horizon, 10)
-            # Columns: mean + 9 quantiles
+            logger.debug(f"Got {len(predictions)} predictions from model")
+
+            # Extract quantiles if available
             quantiles = None
-            if output.full_predictions is not None:
-                full_preds = output.full_predictions[0].cpu().numpy()  # (horizon, 10)
+            if quantile_forecast is not None:
                 quantiles = {}
-                # Assuming columns are: mean, q10, q20, q30, q40, q50, q60, q70, q80, q90
-                quantile_levels = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
-                for i, q in enumerate(quantile_levels, start=1):
-                    if i < full_preds.shape[1]:
-                        quantiles[str(q)] = full_preds[:horizon, i]
-                logger.debug(f"Extracted {len(quantiles)} quantile levels")
+                # TimesFM 2.5 provides quantile forecasts
+                # Format depends on model output structure
+                if isinstance(quantile_forecast, dict):
+                    for q_level, q_values in quantile_forecast.items():
+                        if isinstance(q_values, (list, np.ndarray)):
+                            q_arr = np.array(q_values)
+                            if q_arr.ndim > 1:
+                                quantiles[str(q_level)] = q_arr[0][:horizon]
+                            else:
+                                quantiles[str(q_level)] = q_arr[:horizon]
+                logger.debug(f"Extracted {len(quantiles) if quantiles else 0} quantile levels")
 
             logger.info(f"Generated {len(predictions)} predictions")
             logger.info(f"Prediction range: {predictions.min():.4f} to {predictions.max():.4f}")
@@ -251,7 +271,7 @@ class TimesFMModel(BaseTimeSeriesModel):
                     'output_shape': predictions.shape,
                     'has_quantiles': quantiles is not None,
                     'covariates_support': self.covariates_support,
-                    'timesfm_version': '2.0'
+                    'timesfm_version': '2.5'
                 }
             )
             

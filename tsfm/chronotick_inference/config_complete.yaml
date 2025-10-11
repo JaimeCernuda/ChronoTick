@@ -1,33 +1,33 @@
 # ChronoTick Inference Configuration - Complete with all sections
-# CPU Only with Chronos - Includes clock_measurement and prediction_scheduling
+# CPU Only with TimesFM 2.5 - Includes clock_measurement and prediction_scheduling
 
 short_term:
-  model_name: chronos
+  model_name: timesfm
   device: cpu
   enabled: true
   inference_interval: 1.0
   prediction_horizon: 30  # Match scheduler's CPU horizon for proper caching
-  context_length: 100
+  context_length: 512  # TimesFM supports up to 2048
   max_uncertainty: 0.1
   model_params:
     prediction_length: 30  # Match scheduler's CPU horizon
-    repo: "amazon/chronos-bolt-base"
-    size: "base"
-    multivariate: true
+    context_length: 512
+    model_repo: "google/timesfm-2.5-200m-pytorch"
+    backend: "cpu"
 
 long_term:
-  model_name: chronos
+  model_name: timesfm
   device: cpu
   enabled: true
   inference_interval: 30.0
   prediction_horizon: 60
-  context_length: 300
+  context_length: 512  # TimesFM supports up to 2048
   max_uncertainty: 0.15
   model_params:
     prediction_length: 60
-    repo: "amazon/chronos-bolt-base"
-    size: "base"
-    multivariate: true
+    context_length: 512
+    model_repo: "google/timesfm-2.5-200m-pytorch"
+    backend: "cpu"
 
 fusion:
   enabled: true
