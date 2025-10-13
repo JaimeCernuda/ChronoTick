@@ -35,20 +35,23 @@ class ScheduledTask:
 @dataclass
 class CorrectionWithBounds:
     """Clock correction with simplified error bounds (ML only)"""
-    
+
     # Primary corrections
-    offset_correction: float      
-    drift_rate: float            
-    
+    offset_correction: float
+    drift_rate: float
+
     # ML model uncertainties only
     offset_uncertainty: float    # From TSFM offset prediction interval
     drift_uncertainty: float     # From TSFM drift prediction interval
-    
+
     # Metadata
     prediction_time: float       # When this prediction was made
     valid_until: float          # When this prediction expires
     confidence: float           # Overall confidence [0,1]
     source: str                 # "cpu", "gpu", "fusion"
+
+    # Optional quantiles for confidence intervals
+    quantiles: Optional[Dict[str, float]] = None  # e.g., {'0.1': val, '0.5': val, '0.9': val}
     
     def get_time_uncertainty(self, time_delta: float) -> float:
         """Calculate time uncertainty using error propagation"""
@@ -67,6 +70,45 @@ class CorrectionWithBounds:
     def is_valid(self, current_time: float) -> bool:
         """Check if this prediction is still valid"""
         return current_time <= self.valid_until
+
+    def get_confidence_interval(self, confidence_level: float = 0.9) -> Optional[Tuple[float, float]]:
+        """
+        Get confidence interval for the offset correction based on quantiles.
+
+        Args:
+            confidence_level: Desired confidence level (e.g., 0.9 for 90%)
+
+        Returns:
+            Tuple of (lower_bound, upper_bound) for offset correction, or None if quantiles unavailable
+
+        Example:
+            90% confidence (0.9) → uses quantiles [0.05, 0.95] (middle 90%)
+            80% confidence (0.8) → uses quantiles [0.1, 0.9] (middle 80%)
+        """
+        if not self.quantiles:
+            return None
+
+        # Map confidence level to quantile bounds
+        # For confidence_level C, we want the middle C of the distribution
+        # This means excluding (1-C)/2 from each tail
+        tail = (1.0 - confidence_level) / 2.0
+        lower_quantile = tail
+        upper_quantile = 1.0 - tail
+
+        # Find the closest available quantiles
+        # TimesFM typically provides: 0.1, 0.5, 0.9
+        available_quantiles = sorted([float(q) for q in self.quantiles.keys()])
+
+        # Find closest quantile to lower bound
+        lower_q_str = min(available_quantiles, key=lambda q: abs(q - lower_quantile))
+        # Find closest quantile to upper bound
+        upper_q_str = max(available_quantiles, key=lambda q: abs(q - upper_quantile))
+
+        # Get quantile values
+        lower_bound = self.quantiles[str(lower_q_str)]
+        upper_bound = self.quantiles[str(upper_q_str)]
+
+        return (lower_bound, upper_bound)
 
 
 class PredictiveScheduler:
@@ -272,7 +314,8 @@ class PredictiveScheduler:
                     prediction_time=timestamp,  # Time this prediction is FOR, not when cached
                     valid_until=end_time,
                     confidence=pred.confidence,
-                    source="cpu"
+                    source="cpu",
+                    quantiles=pred.quantiles  # Pass quantiles from prediction
                 )
 
                 self._cache_prediction(timestamp, correction)
@@ -318,7 +361,8 @@ class PredictiveScheduler:
                     prediction_time=timestamp,  # Time this prediction is FOR, not when cached
                     valid_until=end_time,
                     confidence=pred.confidence,
-                    source="gpu"
+                    source="gpu",
+                    quantiles=pred.quantiles  # Pass quantiles from prediction
                 )
 
                 self._cache_prediction(timestamp, correction)

@@ -39,9 +39,9 @@ logger = logging.getLogger(__name__)
 
 class TimesFMModel(BaseTimeSeriesModel):
     """
-    TimesFM 2.0 (Time Series Foundation Model) implementation.
-    
-    TimesFM 2.0 is Google Research's enhanced 500M parameter foundation model for time-series forecasting.
+    TimesFM 2.5 (Time Series Foundation Model) implementation.
+
+    TimesFM 2.5 is Google Research's enhanced 200M parameter foundation model for time-series forecasting.
     Features 4x longer context (2048), dynamic covariates support, flexible horizons, and 25% better performance.
     """
     
@@ -69,7 +69,7 @@ class TimesFMModel(BaseTimeSeriesModel):
         self.tfm = None
         self._dependency_error = None
         
-        logger.info(f"Initialized TimesFM 2.0 with repo: {self.model_repo}")
+        logger.info(f"Initialized TimesFM 2.5 with repo: {self.model_repo}")
         logger.info(f"Context length: {self.context_len}, Covariates: {self.covariates_support}")
     
     def _check_dependencies(self) -> bool:
@@ -283,16 +283,16 @@ class TimesFMModel(BaseTimeSeriesModel):
 
     def forecast_multivariate(self, multivariate_input, horizon: int, **kwargs):
         """
-        TimesFM 2.0 multivariate forecasting implementation.
-        
-        Since TimesFM 2.0 is primarily a univariate model, we forecast each variable 
+        TimesFM 2.5 multivariate forecasting implementation.
+
+        Since TimesFM 2.5 is primarily a univariate model, we forecast each variable
         separately but return a unified result format.
         """
         if self.status != ModelStatus.LOADED:
-            raise RuntimeError("TimesFM 2.0 model not loaded. Call load_model() first.")
+            raise RuntimeError("TimesFM 2.5 model not loaded. Call load_model() first.")
             
         try:
-            logger.info(f"TimesFM 2.0 multivariate forecasting for {len(multivariate_input.variable_names)} variables")
+            logger.info(f"TimesFM 2.5 multivariate forecasting for {len(multivariate_input.variable_names)} variables")
             
             # Validate input shape
             if multivariate_input.data.ndim != 2:
@@ -316,7 +316,7 @@ class TimesFMModel(BaseTimeSeriesModel):
                         'target_variables': list(target_vars),
                         'variable_index': i,
                         'total_variables': len(multivariate_input.variable_names),
-                        'timesfm_2_0_multivariate': True,
+                        'timesfm_2_5_multivariate': True,
                         'inference_method': 'separate_univariate',
                         'context_length_used': len(var_data)
                     })
@@ -327,15 +327,15 @@ class TimesFMModel(BaseTimeSeriesModel):
             return results
             
         except Exception as e:
-            logger.error(f"TimesFM 2.0 multivariate forecasting failed: {e}")
-            raise RuntimeError(f"TimesFM 2.0 multivariate forecasting failed: {e}")
+            logger.error(f"TimesFM 2.5 multivariate forecasting failed: {e}")
+            raise RuntimeError(f"TimesFM 2.5 multivariate forecasting failed: {e}")
     
     @debug_log_call
     def forecast_with_covariates(self, covariates_input, horizon: int, frequency=None, **kwargs):
         """
-        Enhanced TimesFM 2.0 forecasting with dynamic covariates support.
+        Enhanced TimesFM 2.5 forecasting with dynamic covariates support.
 
-        TimesFM 2.0 supports dynamic covariates that influence the forecasting process.
+        TimesFM 2.5 supports dynamic covariates that influence the forecasting process.
         This method provides two modes:
         - use_covariates=True: Uses covariates in predictions (calls TimesFM API with covariates)
         - use_covariates=False: Standard forecast, covariates only in metadata
@@ -397,7 +397,7 @@ class TimesFMModel(BaseTimeSeriesModel):
 
             if use_covariates and len(covariates_input.covariates) > 0:
                 # Use TimesFM API with covariates
-                logger.info(f"TimesFM 2.0 forecasting WITH {len(covariates_input.covariates)} covariates in predictions")
+                logger.info(f"TimesFM 2.5 forecasting WITH {len(covariates_input.covariates)} covariates in predictions")
 
                 # Format covariates for TimesFM API
                 # TimesFM expects: dict[str, Sequence[Sequence[float]]]
@@ -469,7 +469,7 @@ class TimesFMModel(BaseTimeSeriesModel):
                     'categorical_covariates': list(covariates_input.categorical_covariates.keys()) if covariates_input.categorical_covariates else [],
                     'xreg_mode': xreg_mode,
                     'xreg_outputs_available': xreg_outputs is not None,
-                    'timesfm_version': '2.0',
+                    'timesfm_version': '2.5',
                     'timesfm_api_used': 'forecast_with_covariates'
                 }
 
@@ -481,7 +481,7 @@ class TimesFMModel(BaseTimeSeriesModel):
 
             else:
                 # Standard forecast without using covariates in predictions
-                logger.info(f"TimesFM 2.0 forecasting WITHOUT covariates in predictions (use_covariates=False)")
+                logger.info(f"TimesFM 2.5 forecasting WITHOUT covariates in predictions (use_covariates=False)")
                 debug_log_variable("mode", "standard_forecast_without_covariates")
 
                 # Generate forecast using standard method
@@ -497,14 +497,14 @@ class TimesFMModel(BaseTimeSeriesModel):
                     'covariates_available': list(covariates_input.covariates.keys()),
                     'future_covariates_available': covariates_input.future_covariates is not None,
                     'categorical_covariates': list(covariates_input.categorical_covariates.keys()) if covariates_input.categorical_covariates else [],
-                    'timesfm_version': '2.0',
+                    'timesfm_version': '2.5',
                     'timesfm_api_used': 'forecast'
                 })
 
                 return forecast_result
 
         except Exception as e:
-            logger.warning(f"TimesFM 2.0 covariates forecasting failed: {e}, falling back to base")
+            logger.warning(f"TimesFM 2.5 covariates forecasting failed: {e}, falling back to base")
             return super().forecast_with_covariates(covariates_input, horizon, frequency, **kwargs)
     
     def unload_model(self) -> None:

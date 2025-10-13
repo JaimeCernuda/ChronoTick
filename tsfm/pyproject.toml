@@ -146,7 +146,14 @@ conflicts = [
 ]
 
 [project.scripts]
+# Main MCP server (for AI agents)
 chronotick-mcp = "chronotick_inference.mcp_server:cli_main"
+
+# Standalone daemon (for multinode deployments)
+chronotick-daemon = "chronotick_inference.daemon:main"
+
+# Configuration selector tool
+chronotick-config = "chronotick_inference.config_selector:main"
 
 [dependency-groups]
 dev = [

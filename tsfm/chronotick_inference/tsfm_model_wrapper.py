@@ -24,6 +24,7 @@ class PredictionWithUncertainty:
         drift_uncertainty: Drift uncertainty bounds (seconds/second)
         confidence: Prediction confidence [0,1]
         timestamp: Prediction timestamp
+        quantiles: Optional prediction quantiles (e.g., {'0.1': val, '0.5': val, '0.9': val})
     """
     offset: float
     drift: float
@@ -31,6 +32,7 @@ class PredictionWithUncertainty:
     drift_uncertainty: float = 0.0
     confidence: float = 0.95
     timestamp: float = 0.0
+    quantiles: Optional[Dict[str, float]] = None
 
 
 class TSFMModelWrapper:
@@ -237,13 +239,22 @@ class TSFMModelWrapper:
             # Drift uncertainty (approximate as 10% of offset uncertainty)
             drift_uncertainty = offset_uncertainty * 0.1
 
+            # Extract quantiles for this timestep (if available)
+            quantiles_dict = None
+            if prediction_result.quantiles is not None:
+                quantiles_dict = {}
+                for q_level, q_array in prediction_result.quantiles.items():
+                    if i < len(q_array):
+                        quantiles_dict[q_level] = float(q_array[i])
+
             predictions.append(PredictionWithUncertainty(
                 offset=offset,
                 drift=drift,
                 offset_uncertainty=offset_uncertainty,
                 drift_uncertainty=drift_uncertainty,
                 confidence=0.95,  # Default confidence
-                timestamp=prediction_result.timestamp + i
+                timestamp=prediction_result.timestamp + i,
+                quantiles=quantiles_dict
             ))
 
         # If we need more predictions than were generated, extrapolate
@@ -255,7 +266,8 @@ class TSFMModelWrapper:
                 offset_uncertainty=last_pred.offset_uncertainty * 1.1,  # Increase uncertainty
                 drift_uncertainty=last_pred.drift_uncertainty * 1.1,
                 confidence=last_pred.confidence * 0.95,  # Decrease confidence
-                timestamp=last_pred.timestamp + 1
+                timestamp=last_pred.timestamp + 1,
+                quantiles=None  # No quantiles for extrapolated predictions
             ))
 
         return predictions

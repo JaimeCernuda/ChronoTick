@@ -350,6 +350,27 @@ class ChronoTickMCPServer:
                         },
                         "required": ["future_seconds"]
                     }
+                ),
+                types.Tool(
+                    name="get_time_with_confidence_interval",
+                    description="Get corrected time with confidence interval bounds based on TimesFM quantiles",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "confidence_level": {
+                                "type": "number",
+                                "description": "Confidence level for interval (e.g., 0.9 for 90% confidence)",
+                                "minimum": 0.0,
+                                "maximum": 1.0,
+                                "default": 0.9
+                            },
+                            "include_stats": {
+                                "type": "boolean",
+                                "description": "Include detailed statistics",
+                                "default": False
+                            }
+                        }
+                    }
                 )
             ]
         
@@ -365,6 +386,8 @@ class ChronoTickMCPServer:
                     result = await self._handle_get_daemon_status()
                 elif name == "get_time_with_future_uncertainty":
                     result = await self._handle_get_time_with_future_uncertainty(arguments)
+                elif name == "get_time_with_confidence_interval":
+                    result = await self._handle_get_time_with_confidence_interval(arguments)
                 else:
                     raise ValueError(f"Unknown tool: {name}")
                 
@@ -481,7 +504,83 @@ class ChronoTickMCPServer:
             })
         
         return current_response
-    
+
+    @debug_trace(include_args=True, include_result=True, include_timing=True)
+    async def _handle_get_time_with_confidence_interval(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle time requests with confidence interval bounds from quantiles"""
+        if not self._is_daemon_ready():
+            raise RuntimeError("ChronoTick daemon not ready - check daemon status")
+
+        confidence_level = arguments.get("confidence_level", 0.9)
+        request_start = time.time()
+
+        # Get correction from daemon
+        correction = await self._get_correction_from_daemon()
+        if not correction:
+            raise RuntimeError("Failed to get time correction from daemon")
+
+        # Calculate corrected time
+        system_time = time.time()
+        time_delta = system_time - correction.prediction_time
+        corrected_time = system_time + correction.offset_correction + (correction.drift_rate * time_delta)
+
+        # Calculate uncertainty at current time
+        time_uncertainty = correction.get_time_uncertainty(time_delta)
+
+        # Get confidence interval from quantiles
+        confidence_interval = correction.get_confidence_interval(confidence_level)
+
+        # Get daemon status
+        daemon_status = await self._get_daemon_status_from_daemon()
+
+        # Build base response
+        response = {
+            "corrected_time": corrected_time,
+            "system_time": system_time,
+            "offset_correction": correction.offset_correction,
+            "drift_rate": correction.drift_rate,
+            "offset_uncertainty": correction.offset_uncertainty,
+            "drift_uncertainty": correction.drift_uncertainty,
+            "time_uncertainty": time_uncertainty,
+            "confidence": correction.confidence,
+            "source": correction.source,
+            "prediction_time": correction.prediction_time,
+            "valid_until": correction.valid_until,
+            "daemon_status": daemon_status.status if daemon_status else "unknown",
+            "call_latency_ms": (time.time() - request_start) * 1000,
+            "confidence_level": confidence_level
+        }
+
+        # Add confidence interval if available
+        if confidence_interval:
+            lower_bound, upper_bound = confidence_interval
+            # Apply same drift correction to bounds
+            lower_time = system_time + lower_bound + (correction.drift_rate * time_delta)
+            upper_time = system_time + upper_bound + (correction.drift_rate * time_delta)
+
+            response.update({
+                "confidence_interval": {
+                    "lower_bound": lower_time,
+                    "upper_bound": upper_time,
+                    "range": upper_time - lower_time,
+                    "offset_lower": lower_bound,
+                    "offset_upper": upper_bound
+                },
+                "quantiles_available": True
+            })
+        else:
+            response.update({
+                "confidence_interval": None,
+                "quantiles_available": False,
+                "note": "Quantiles not available from model - using uncertainty bounds as fallback"
+            })
+
+        # Add detailed stats if requested
+        if arguments.get("include_stats", False):
+            response["detailed_stats"] = await self._get_detailed_stats()
+
+        return response
+
     @debug_trace(include_args=False, include_result=True, include_timing=True)
     async def _get_correction_from_daemon(self) -> Optional[CorrectionWithBounds]:
         """Get time correction from daemon via IPC"""

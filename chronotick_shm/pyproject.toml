@@ -1,7 +1,7 @@
 [project]
-name = "chronotick-shm"
+name = "chronotick"
 version = "0.1.0"
-description = "ChronoTick Shared Memory - Ultra-low latency time synchronization"
+description = "ChronoTick - High-precision time synchronization with ML-enhanced predictions and uncertainty quantification"
 requires-python = ">=3.10"
 dependencies = [
     "claude-agent-sdk>=0.1.0",
