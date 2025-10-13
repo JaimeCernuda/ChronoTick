@@ -1,0 +1,79 @@
+# ChronoTick Inference Configuration - GPU Only with Toto
+# Optimized for GPU deployment with Toto transformer models
+
+short_term:
+  model_name: toto
+  device: cuda
+  enabled: true
+  inference_interval: 1.0
+  prediction_horizon: 8
+  context_length: 256
+  max_uncertainty: 0.09
+  model_params:
+    prediction_length: 8
+    context_length: 256
+    model_size: "base"
+    attention_heads: 8
+
+long_term:
+  model_name: toto
+  device: cuda
+  enabled: true
+  inference_interval: 30.0
+  prediction_horizon: 128
+  context_length: 512
+  max_uncertainty: 0.11
+  model_params:
+    prediction_length: 128
+    context_length: 512
+    model_size: "large"
+    attention_heads: 12
+
+fusion:
+  enabled: true
+  method: inverse_variance
+  uncertainty_threshold: 0.04
+  fallback_weights:
+    short_term: 0.75
+    long_term: 0.25
+
+preprocessing:
+  outlier_removal:
+    enabled: true
+    method: iqr
+    threshold: 2.5
+  missing_value_handling:
+    enabled: true
+    method: interpolate
+  normalization:
+    enabled: true
+    method: zscore
+
+covariates:
+  enabled: true
+  variables:
+    - cpu_usage
+    - temperature
+    - memory_usage
+    - voltage
+    - frequency
+    - disk_io
+    - network_io
+  future_variables:
+    - cpu_usage  # Toto can handle future covariates well
+
+performance:
+  max_memory_mb: 6144
+  model_timeout: 12.0
+  cache_size: 15
+  batch_size: 6
+
+logging:
+  level: INFO
+  log_predictions: true
+  log_uncertainty: true
+  log_fusion_weights: true
+
+clock:
+  frequency_type: second
+  frequency_code: 9

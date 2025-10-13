@@ -1,0 +1,79 @@
+# ChronoTick Inference Configuration - GPU Only with TimesFM
+# Optimized for GPU deployment with Google TimesFM 2.0
+
+short_term:
+  model_name: timesfm
+  device: cuda
+  enabled: true
+  inference_interval: 1.0
+  prediction_horizon: 5
+  context_length: 512
+  max_uncertainty: 0.08
+  model_params:
+    context_len: 512
+    horizon_len: 5
+    repo: "google/timesfm-2.0-500m-pytorch"
+    covariates_enabled: true
+
+long_term:
+  model_name: timesfm
+  device: cuda
+  enabled: true
+  inference_interval: 30.0
+  prediction_horizon: 300  # TimesFM excels at long horizons
+  context_length: 1024
+  max_uncertainty: 0.10
+  model_params:
+    context_len: 1024
+    horizon_len: 300
+    repo: "google/timesfm-2.0-500m-pytorch"
+    covariates_enabled: true
+
+fusion:
+  enabled: true
+  method: inverse_variance
+  uncertainty_threshold: 0.03
+  fallback_weights:
+    short_term: 0.6
+    long_term: 0.4
+
+preprocessing:
+  outlier_removal:
+    enabled: true
+    method: iqr
+    threshold: 1.8
+  missing_value_handling:
+    enabled: true
+    method: interpolate
+  normalization:
+    enabled: true
+    method: zscore
+
+covariates:
+  enabled: true
+  variables:
+    - cpu_usage
+    - temperature
+    - memory_usage
+    - voltage
+    - frequency
+    - disk_io
+    - network_io
+  future_variables:
+    - temperature  # Can predict temperature trends
+
+performance:
+  max_memory_mb: 8192  # GPU has more memory
+  model_timeout: 15.0
+  cache_size: 20
+  batch_size: 8
+
+logging:
+  level: INFO
+  log_predictions: true
+  log_uncertainty: true
+  log_fusion_weights: true
+
+clock:
+  frequency_type: second
+  frequency_code: 9
