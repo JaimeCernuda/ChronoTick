@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from chronotick.inference.engine import ChronoTickInferenceEngine
 from chronotick.inference.real_data_pipeline import RealDataPipeline
 from chronotick.inference.tsfm_model_wrapper import create_model_wrappers
-from chronotick.inference.dataset_correction_logger import DatasetCorrectionLogger, ClientPredictionLogger
+from chronotick.inference.logging import DatasetCorrectionLogger, ClientPredictionLogger
 
 # Parse arguments
 parser = argparse.ArgumentParser(description='Test with visualization data')
