@@ -1,0 +1,168 @@
+ADVANCE_ABSOLUTE v3: Uncertainty-Weighted Distribution of Total Accumulated Error
+====================================================================================
+
+GOAL (from user):
+"Implement the same algorithm as advance with proportional adjustment of the error at
+every point but using as error not the error at the NTP point but the total error over
+the period, and include a directional element so over-predicted go down and under-predicted go up"
+
+
+ALGORITHM OVERVIEW
+==================
+
+advance_absolute v3 = advanced algorithm + total accumulated error
+
+Key differences from other methods:
+
+1. LINEAR:
+   - Distributes point error E linearly
+   - sum(corrections) = E
+   - Simple time-based weighting
+
+2. DRIFT_AWARE:
+   - Attributes error to offset + drift components
+   - sum(corrections) = E
+   - Uncertainty-based allocation between offset and drift
+
+3. ADVANCED:
+   - Distributes point error E using uncertainty weighting
+   - sum(corrections) = E
+   - Points with HIGH uncertainty get MORE correction
+
+4. ADVANCE_ABSOLUTE v3:
+   - Distributes TOTAL accumulated error (E × N/2) using uncertainty weighting
+   - sum(corrections) = E × N/2  ← MUCH LARGER!
+   - Points with HIGH uncertainty get MORE correction
+   - Accounts for cumulative drift impact over entire period
+
+
+MATHEMATICAL FORMULATION
+=========================
+
+Given:
+- Point error at t_NTP: E = NTP_truth - Prediction
+- N timestamps in interval [t_start, t_NTP]
+- Linear drift assumption: error grows from 0 to E over N timestamps
+
+Accumulated error at each timestamp:
+  t_1: error = E/N
+  t_2: error = 2E/N
+  t_3: error = 3E/N
+  ...
+  t_N: error = E
+
+Total accumulated error:
+  Total = sum(error at each t_i)
+        = E/N + 2E/N + 3E/N + ... + NE/N
+        = E × (1 + 2 + 3 + ... + N) / N
+        = E × [N(N+1)/2] / N
+        = E × (N+1)/2
+        ≈ E × N/2  (for large N)
+
+Distribution using uncertainty weighting:
+  For each timestamp t_i:
+    σ²(t_i) = σ²_measurement + σ²_prediction + (σ_drift × Δt_i)²
+    weight_i = σ²(t_i)  [Direct variance weighting]
+    α_i = weight_i / sum(weights)  [Normalized]
+    correction_i = α_i × Total  [Weighted share of total error]
+
+Properties:
+  - sum(corrections) = Total = E × N/2
+  - Corrections are N/2 times larger than 'advanced'
+  - Later timestamps (higher uncertainty) get proportionally more correction
+
+
+DIRECTIONAL CORRECTION
+=======================
+
+Sign of error determines direction:
+
+If error > 0 (under-predicted):
+  - Our prediction < NTP ground truth
+  - We need to PUSH UP
+  - Corrections are positive → offsets increase
+
+If error < 0 (over-predicted):
+  - Our prediction > NTP ground truth
+  - We need to PUSH DOWN
+  - Corrections are negative → offsets decrease
+
+This is automatic via the sign of error - no special logic needed.
+
+
+EXAMPLE CALCULATION
+====================
+
+Scenario:
+- Point error E = -7.73ms (over-predicted by 7.73ms)
+- Interval duration: 180 seconds
+- N = 180 timestamps
+
+Calculation:
+- Total accumulated error = -7.73ms × 180/2 = -695.7ms
+- Amplification factor = 180/2 = 90x
+
+- 'advanced' would distribute: -7.73ms total
+- 'advance_absolute' distributes: -695.7ms total (90x more!)
+
+Direction:
+- error < 0 → over-predicted
+- Corrections are negative (PUSH DOWN)
+- All offsets will be reduced to align with NTP
+
+Uncertainty weighting:
+- Timestamps far from last NTP (high uncertainty) get larger corrections
+- Timestamps near last NTP (low uncertainty) get smaller corrections
+- Total still sums to -695.7ms
+
+
+EXPECTED IMPACT
+================
+
+Compared to 'advanced':
+- 90x more aggressive corrections (for 180s interval)
+- Should dramatically improve alignment with NTP
+- May risk over-correction if assumptions are wrong
+- Could introduce more volatility in predictions
+
+Compared to 'drift_aware':
+- Much more aggressive
+- drift_aware: 9.519ms MAE
+- advance_absolute: Expected ??? (to be tested)
+
+The key question: Does accounting for cumulative drift impact improve
+accuracy, or does it over-correct and introduce new errors?
+
+
+IMPLEMENTATION NOTES
+====================
+
+File: chronotick_inference/real_data_pipeline.py
+Method: _apply_advance_absolute_correction()
+
+Steps:
+1. Count timestamps in interval → N
+2. Calculate total = E × N/2
+3. Calculate uncertainty weights for each timestamp
+4. Normalize weights
+5. Distribute total using weighted shares
+6. Apply corrections to dataset
+
+Correctness checks:
+- sum(corrections) should equal total_accumulated_error
+- Direction should match sign of error
+- Larger intervals should have larger amplification factors
+
+
+TESTING PLAN
+=============
+
+1. Run 5-minute test to verify implementation works
+2. Check that corrections are larger than 'advanced'
+3. Run full 25-minute test
+4. Compare MAE vs other methods
+5. Analyze if aggressive correction helps or hurts
+
+
+Created: 2025-10-11
+Version: 3 (weighted distribution of total accumulated error)

@@ -1,0 +1,177 @@
+================================================================
+COVARIATES INVESTIGATION - FINDINGS
+================================================================
+
+Date: 2025-10-12
+Duration: 3-minute validation test
+Model: SHORT-TERM ONLY (TimesFM 2.5)
+Method: ADVANCED
+
+
+THE BUG - ROOT CAUSE IDENTIFIED
+================================================================
+
+Original Problem:
+  - Covariates were enabled in config but NOT being used
+  - Setting `covariates.enabled = true` was not sufficient
+
+Root Cause (engine.py lines 234-245, 328-339):
+  TWO separate settings required for covariates to work:
+
+  1. Global setting:
+     covariates:
+       enabled: true  ✓
+
+  2. Per-model setting (THIS WAS MISSING!):
+     short_term:
+       use_covariates: true  ❌ (defaulted to False if not present)
+
+     long_term:
+       use_covariates: true  ❌ (defaulted to False if not present)
+
+The Bug Code (engine.py:240):
+  ```python
+  use_covariates = short_config.get('use_covariates', False)  # ← Defaults to False!
+  ```
+
+Even with global covariates enabled, if the per-model setting is missing,
+`use_covariates` defaults to `False` and covariates are NOT passed to the model.
+
+
+THE FIX
+================================================================
+
+Created: chronotick_inference/config_short_only_with_covariates.yaml
+
+Changes:
+  1. Added `use_covariates: true` to short_term section
+  2. Set `covariates.enabled: true` globally
+  3. Listed variables: cpu_usage, temperature, memory_usage
+
+
+VALIDATION TEST RESULTS
+================================================================
+
+Test Configuration:
+  - Config: config_short_only_with_covariates.yaml
+  - Duration: 3 minutes (180 seconds)
+  - Method: ADVANCED
+  - Interval: 10 seconds
+
+✅ Config Fix Validation - SUCCESS:
+  - System metrics ARE being collected
+  - Covariates retrieved: ['cpu_usage', 'memory_usage', 'load_average']
+  - Covariates ARE being passed to model wrapper
+  - Model initialized with: "Covariates: True"
+
+Log Evidence:
+  2025-10-12 00:45:47,681 - chronotick_inference.tsfm_model_wrapper - DEBUG - Getting covariates...
+  2025-10-12 00:45:47,681 - chronotick_inference.tsfm_model_wrapper - DEBUG - Retrieved 3 covariates: ['cpu_usage', 'memory_usage', 'load_average']
+  2025-10-12 00:45:47,682 - tsfm.LLM.timesfm - INFO - TimesFM 2.5 forecasting WITH 2 covariates in predictions
+  2025-10-12 00:45:47,682 - tsfm.LLM.timesfm - INFO - Calling TimesFM with dynamic_numerical_covariates: ['cpu_usage', 'memory_usage']
+
+❌ TimesFM 2.5 Limitation Discovered:
+  2025-10-12 00:45:47,682 - tsfm.LLM.timesfm - WARNING - TimesFM 2.5 covariates forecasting failed: 'TimesFM_2p5_200M_torch' object has no attribute 'forecast_with_covariates', falling back to base
+
+Model doesn't support covariates yet!
+
+
+TIMESFM 2.5 COVARIATES STATUS
+================================================================
+
+Official Documentation (GitHub):
+  "will be under construction over the next few weeks to... add back covariate support"
+
+Key Finding:
+  - TimesFM 2.5 does NOT currently support covariates
+  - The `forecast_with_covariates` method doesn't exist in TimesFM_2p5_200M_torch
+  - This is a PLANNED FUTURE FEATURE
+  - It will be "added back" (existed in earlier versions)
+
+Our Implementation Status:
+  ✅ Infrastructure ready: Config, collection, passing all works
+  ✅ Fallback mechanism works: Gracefully falls back to standard forecasting
+  ❌ Model support: TimesFM 2.5 doesn't have the API yet
+
+
+PRACTICAL IMPLICATIONS
+================================================================
+
+Current Reality:
+  - Enabling covariates in config does NOT improve accuracy (yet)
+  - System will collect covariates but model ignores them
+  - No performance difference between WITH and WITHOUT covariates
+  - Fallback to standard forecasting is transparent and safe
+
+Future (when TimesFM adds covariates support):
+  ✅ Our config is already correct
+  ✅ Collection infrastructure works
+  ✅ Model wrapper ready
+  ✅ Just need to update timesfm package
+
+
+CONCLUSION & RECOMMENDATION
+================================================================
+
+Config Bug Status: ✅ FIXED
+  - Two-level setting requirement now documented
+  - New config file created with both settings
+  - Infrastructure validated and working
+
+Phase 3 Testing Recommendation: SKIP COVARIATES TESTING
+
+Reason:
+  - TimesFM 2.5 doesn't support covariates yet
+  - Testing WITH vs WITHOUT covariates will show NO difference
+  - Would waste ~50 minutes (2 × 25min tests) for same result
+  - No objective proof possible until model supports it
+
+Alternative Approach:
+  ⏭️  SKIP Phase 3 (covariates testing)
+  ⏭️  PROCEED to Phase 4 (overnight validation) with:
+       - SHORT-ONLY + ADVANCED (Phase 2 winner)
+       - No covariates (since they don't work anyway)
+
+
+NEXT STEPS
+================================================================
+
+Immediate:
+  1. ✅ Document findings (this file)
+  2. Update todo list to skip Phase 3
+  3. Prepare for Phase 4: 8-hour overnight test
+
+When TimesFM Adds Covariates Support:
+  1. Update timesfm package
+  2. Verify `forecast_with_covariates` method exists
+  3. Re-run Phase 3 tests (WITH vs WITHOUT covariates)
+  4. Compare accuracy to determine if covariates add value
+
+
+TECHNICAL DETAILS
+================================================================
+
+Config File Locations:
+  - Base (no covariates): chronotick_inference/config_short_only.yaml
+  - With covariates (ready for future): chronotick_inference/config_short_only_with_covariates.yaml
+
+Bug Fix Code Location:
+  - File: chronotick_inference/engine.py
+  - Lines: 234-245 (short-term), 328-339 (long-term)
+  - Required setting: `use_covariates: true` in model config sections
+
+Model Wrapper Implementation:
+  - File: tsfm/LLM/timesfm.py
+  - Method: forecast_with_covariates (lines 334-175)
+  - Fallback: Gracefully handles missing method (line 174)
+
+Validation Test Output:
+  - Log: results/ntp_correction_experiment/covariates_validation_test.log
+  - Summary: results/ntp_correction_experiment/covariates_validation/summary_advanced_20251012_004447.csv
+
+
+================================================================
+Generated: 2025-10-12 00:48 UTC
+Status: Investigation Complete
+Recommendation: Skip Phase 3, proceed to Phase 4
+================================================================

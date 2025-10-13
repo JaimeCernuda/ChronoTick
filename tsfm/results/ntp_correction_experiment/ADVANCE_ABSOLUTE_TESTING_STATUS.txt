@@ -1,0 +1,107 @@
+================================================================
+ADVANCE_ABSOLUTE TESTING - Phase 2 Supplemental Test
+================================================================
+
+Started: 2025-10-12 00:07 UTC
+Expected Completion: 2025-10-12 00:32 UTC (~25 minutes)
+Process ID: 1521171
+
+Configuration:
+  - Model: SHORT-TERM ONLY (config_short_only.yaml)
+  - Method: advance_absolute
+  - Duration: 25 minutes (1500 seconds)
+  - Interval: 10 seconds
+  - Covariates: DISABLED
+
+Output Directory:
+  results/ntp_correction_experiment/phase2_short_only/advance_absolute/
+
+Log File:
+  results/ntp_correction_experiment/phase2_advance_absolute.log
+
+
+WHY TEST ADVANCE_ABSOLUTE?
+================================================================
+
+Phase 1 (DUAL-MODEL) Results:
+  - ADVANCE_ABSOLUTE: 70.455ms MAE ❌ (worst performer)
+  - Performed WORSE than baseline NONE (54.886ms)
+  - Considered failed in Phase 1
+
+However, Phase 2 revealed a major finding:
+  - SHORT-ONLY improved ADVANCED from 25.857ms → 4.903ms (81% better!)
+  - Pattern: Dual-model fusion was HURTING performance
+
+Question: Will advance_absolute also benefit from SHORT-ONLY?
+
+Hypothesis: The advance_absolute algorithm may have been degraded by
+dual-model fusion. Testing with SHORT-ONLY will reveal if the algorithm
+itself is flawed or if it was just incompatible with fusion.
+
+
+CURRENT PHASE 2 RESULTS (SHORT-ONLY)
+================================================================
+
+Completed Tests:
+  1. ADVANCED:     4.903ms ⭐ BEST
+  2. NONE:         5.980ms
+  3. DRIFT_AWARE:  9.974ms
+  4. LINEAR:      34.034ms
+
+Running Now:
+  5. ADVANCE_ABSOLUTE: In progress...
+
+
+WHAT'S NEXT?
+================================================================
+
+After advance_absolute completes (~25 minutes):
+
+1. Calculate MAE vs NTP ground truth
+2. Update PHASE_1_VS_PHASE_2_COMPARISON.txt
+3. Determine final winner between:
+   - ADVANCED (4.903ms)
+   - ADVANCE_ABSOLUTE (TBD)
+
+If advance_absolute performs well:
+  - May become the new winner
+  - Would validate hypothesis about fusion degradation
+
+If advance_absolute still performs poorly:
+  - ADVANCED remains winner
+  - Confirms the algorithm itself has issues
+
+
+FUTURE TEST PHASES
+================================================================
+
+Phase 3: Covariates Testing
+  - Test winner WITH and WITHOUT covariates
+  - Variables: cpu_usage, temperature, memory_usage
+  - Determine if external factors improve accuracy
+
+Phase 4: 8-Hour Overnight Validation
+  - Extended stability test
+  - Production readiness validation
+  - Final configuration confirmation
+
+
+MONITORING THE TEST
+================================================================
+
+Check progress:
+  tail -f results/ntp_correction_experiment/phase2_advance_absolute.log
+
+Check process status:
+  ps aux | grep "advance_absolute.*1500"
+
+Expected output files:
+  - summary_advance_absolute_*.csv
+  - client_predictions_advance_absolute_*.csv
+  - dataset_corrections_advance_absolute_*.csv
+
+
+================================================================
+Status: RUNNING
+Last Updated: 2025-10-12 00:11 UTC
+================================================================
