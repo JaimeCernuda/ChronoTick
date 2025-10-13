@@ -49,7 +49,9 @@ dev = [
 # Core ChronoTick with ML models
 chronotick = [
     "chronos-forecasting>=1.0.0",
-    "timesfm>=1.0.0",
+    # TimesFM 2.5 requires GitHub version (not PyPI)
+    # Install with: uv pip install git+https://github.com/google-research/timesfm.git
+    "timesfm @ git+https://github.com/google-research/timesfm.git",
     "jax>=0.7.0",
     "jaxlib>=0.7.0",
 ]
