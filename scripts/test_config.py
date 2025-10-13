@@ -3,7 +3,7 @@
 import yaml
 from pathlib import Path
 
-config_path = Path(__file__).parent.parent / "chronotick_inference" / "config.yaml"
+config_path = Path(__file__).parent.parent / "configs" / "config.yaml"
 
 print(f"Loading config from: {config_path}")
 print(f"File exists: {config_path.exists()}")

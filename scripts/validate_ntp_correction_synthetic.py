@@ -13,7 +13,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from chronotick_inference.real_data_pipeline import RealDataPipeline
+from chronotick.inference.real_data_pipeline import RealDataPipeline
 
 def create_synthetic_dataset(num_points=100, base_offset=-50e-3, drift_rate=100e-6):
     """

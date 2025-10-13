@@ -27,9 +27,9 @@ logger = logging.getLogger(__name__)
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from chronotick_inference.engine import ChronoTickInferenceEngine
-from chronotick_inference.real_data_pipeline import RealDataPipeline
-from chronotick_inference.tsfm_model_wrapper import create_model_wrappers
+from chronotick.inference.engine import ChronoTickInferenceEngine
+from chronotick.inference.real_data_pipeline import RealDataPipeline
+from chronotick.inference.tsfm_model_wrapper import create_model_wrappers
 
 # Parse command-line arguments
 parser = argparse.ArgumentParser(description='Test NTP correction methods')
@@ -50,7 +50,7 @@ print(f"Sampling interval: {args.interval}s")
 print()
 
 # Load config and temporarily override the correction method
-config_path = "chronotick_inference/config_complete.yaml"
+config_path = "configs/config_complete.yaml"
 
 # We need to set the correction method in the config before loading
 import yaml
@@ -69,7 +69,7 @@ print(f"Setting correction method to: {args.method}")
 print(f"Config path: prediction_scheduling.ntp_correction.method")
 
 # Write temporary config
-temp_config_path = f"chronotick_inference/config_test_{args.method}.yaml"
+temp_config_path = f"configs/config_test_{args.method}.yaml"
 with open(temp_config_path, 'w') as f:
     yaml.dump(config, f)
 print(f"✓ Created temporary config: {temp_config_path}\n")

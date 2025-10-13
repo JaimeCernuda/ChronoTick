@@ -25,8 +25,8 @@ warnings.filterwarnings("ignore")
 # TSFM imports - adjust path as needed
 import sys
 sys.path.append('../tsfm')
-from tsfm import TSFMFactory, MultivariateInput, CovariatesInput, FrequencyInfo
-from tsfm.datasets.preprocessing import remove_outliers, fill_missing_values
+from chronotick.tsfm import TSFMFactory, MultivariateInput, CovariatesInput, FrequencyInfo
+from chronotick.tsfm.datasets.preprocessing import remove_outliers, fill_missing_values
 
 logger = logging.getLogger(__name__)
 

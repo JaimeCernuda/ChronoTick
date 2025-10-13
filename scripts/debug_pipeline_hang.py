@@ -11,9 +11,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from chronotick_inference.engine import ChronoTickInferenceEngine
-from chronotick_inference.real_data_pipeline import RealDataPipeline
-from chronotick_inference.tsfm_model_wrapper import create_model_wrappers
+from chronotick.inference.engine import ChronoTickInferenceEngine
+from chronotick.inference.real_data_pipeline import RealDataPipeline
+from chronotick.inference.tsfm_model_wrapper import create_model_wrappers
 
 # Enable verbose logging
 logging.basicConfig(
@@ -57,7 +57,7 @@ def test_1_basic_initialization():
     print("TEST 1: Basic Initialization")
     print("=" * 80)
 
-    config_path = "chronotick_inference/config.yaml"
+    config_path = "configs/config.yaml"
 
     # Initialize engine
     print("\n1.1 Initializing engine...")
@@ -131,7 +131,7 @@ def test_3_warmup_to_normal_transition():
     print("TEST 3: Warmup to Normal Transition")
     print("=" * 80)
 
-    config_path = "chronotick_inference/config.yaml"
+    config_path = "configs/config.yaml"
 
     # Reinitialize everything
     engine = ChronoTickInferenceEngine(config_path)
@@ -197,7 +197,7 @@ def test_4_scheduler_isolation():
     print("TEST 4: Scheduler Isolation")
     print("=" * 80)
 
-    config_path = "chronotick_inference/config.yaml"
+    config_path = "configs/config.yaml"
 
     engine = ChronoTickInferenceEngine(config_path)
     engine.initialize_models()
@@ -266,7 +266,7 @@ def test_5_lock_detection():
     print("TEST 5: Lock Detection")
     print("=" * 80)
 
-    config_path = "chronotick_inference/config.yaml"
+    config_path = "configs/config.yaml"
 
     engine = ChronoTickInferenceEngine(config_path)
     engine.initialize_models()

@@ -28,9 +28,9 @@ logger = logging.getLogger(__name__)
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from chronotick_inference.engine import ChronoTickInferenceEngine
-from chronotick_inference.real_data_pipeline import RealDataPipeline
-from chronotick_inference.tsfm_model_wrapper import create_model_wrappers
+from chronotick.inference.engine import ChronoTickInferenceEngine
+from chronotick.inference.real_data_pipeline import RealDataPipeline
+from chronotick.inference.tsfm_model_wrapper import create_model_wrappers
 
 # HOOK: Intercept dataset corrections to log before/after
 class CorrectionLogger:
@@ -103,7 +103,7 @@ print()
 
 # Setup config
 import yaml
-config_path = "chronotick_inference/config_complete.yaml"
+config_path = "configs/config_complete.yaml"
 with open(config_path, 'r') as f:
     config = yaml.safe_load(f)
 
@@ -114,7 +114,7 @@ if 'ntp_correction' not in config['prediction_scheduling']:
 
 config['prediction_scheduling']['ntp_correction']['method'] = args.method
 
-temp_config_path = f"chronotick_inference/config_test_{args.method}.yaml"
+temp_config_path = f"configs/config_test_{args.method}.yaml"
 with open(temp_config_path, 'w') as f:
     yaml.dump(config, f)
 

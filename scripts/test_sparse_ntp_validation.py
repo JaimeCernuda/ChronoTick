@@ -19,9 +19,9 @@ import threading
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from chronotick_inference.engine import ChronoTickInferenceEngine
-from chronotick_inference.real_data_pipeline import RealDataPipeline
-from chronotick_inference.tsfm_model_wrapper import create_model_wrappers
+from chronotick.inference.engine import ChronoTickInferenceEngine
+from chronotick.inference.real_data_pipeline import RealDataPipeline
+from chronotick.inference.tsfm_model_wrapper import create_model_wrappers
 
 # Setup logging
 logging.basicConfig(
@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 class SparseNTPValidator:
     def __init__(self, test_duration_seconds: int = 900):  # 15 minutes default
         self.test_duration = test_duration_seconds
-        self.config_path = "chronotick_inference/config.yaml"
+        self.config_path = "configs/config.yaml"
 
         # Components
         self.engine = None

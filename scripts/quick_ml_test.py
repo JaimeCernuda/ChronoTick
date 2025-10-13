@@ -16,16 +16,16 @@ logging.basicConfig(
     format='%(levelname)-8s | %(name)-30s | %(message)s'
 )
 
-from chronotick_inference.engine import ChronoTickInferenceEngine
-from chronotick_inference.real_data_pipeline import RealDataPipeline
-from chronotick_inference.tsfm_model_wrapper import create_model_wrappers
+from chronotick.inference.engine import ChronoTickInferenceEngine
+from chronotick.inference.real_data_pipeline import RealDataPipeline
+from chronotick.inference.tsfm_model_wrapper import create_model_wrappers
 
 print("=" * 80)
 print("QUICK ML VALIDATION TEST")
 print("=" * 80)
 print()
 
-config_path = "chronotick_inference/config.yaml"
+config_path = "configs/config.yaml"
 
 # Initialize
 print("Loading TimesFM models...")

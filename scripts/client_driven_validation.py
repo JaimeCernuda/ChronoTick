@@ -19,9 +19,9 @@ from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from chronotick_inference.engine import ChronoTickInferenceEngine
-from chronotick_inference.real_data_pipeline import RealDataPipeline
-from chronotick_inference.tsfm_model_wrapper import create_model_wrappers
+from chronotick.inference.engine import ChronoTickInferenceEngine
+from chronotick.inference.real_data_pipeline import RealDataPipeline
+from chronotick.inference.tsfm_model_wrapper import create_model_wrappers
 
 print("=" * 80)
 print("CLIENT-DRIVEN LONG-TERM VALIDATION TEST")
@@ -45,7 +45,7 @@ print(f"  CSV output: {CSV_PATH}")
 print()
 
 # Initialize ChronoTick system
-config_path = "chronotick_inference/config_complete.yaml"
+config_path = "configs/config_complete.yaml"
 
 print("Initializing ChronoTick system...")
 engine = ChronoTickInferenceEngine(config_path)

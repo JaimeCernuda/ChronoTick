@@ -33,7 +33,7 @@ print("=" * 80)
 print()
 
 # Get configuration
-config_path = str(Path(__file__).parent.parent / "chronotick_inference" / "config.yaml")
+config_path = str(Path(__file__).parent.parent / "configs" / "config.yaml")
 
 # Step 1: Start ChronoTick
 print("Step 1: Starting ChronoTick daemon...")

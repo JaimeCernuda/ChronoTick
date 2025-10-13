@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import chronotick
-from chronotick_inference.ntp_client import NTPClient, NTPConfig
+from chronotick.inference.ntp_client import NTPClient, NTPConfig
 
 
 # Configuration
@@ -105,7 +105,7 @@ def main():
 
     # Start ChronoTick
     print("🚀 Starting ChronoTick...")
-    config_path = str(Path(__file__).parent.parent / "chronotick_inference" / "config_complete.yaml")
+    config_path = str(Path(__file__).parent.parent / "configs" / "config_complete.yaml")
 
     if not chronotick.start(config_path=config_path, auto_config=False):
         print("❌ FAILED: Could not start ChronoTick")

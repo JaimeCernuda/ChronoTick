@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Tuple, Union
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import numpy as np
-from tsfm.datasets.preprocessing import denormalize_data
+from chronotick.tsfm.datasets.preprocessing import denormalize_data
 
 logger = logging.getLogger(__name__)
 

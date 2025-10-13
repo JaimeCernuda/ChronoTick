@@ -7,15 +7,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from chronotick_inference.engine import ChronoTickInferenceEngine
-from chronotick_inference.real_data_pipeline import RealDataPipeline
-from chronotick_inference.tsfm_model_wrapper import create_model_wrappers
+from chronotick.inference.engine import ChronoTickInferenceEngine
+from chronotick.inference.real_data_pipeline import RealDataPipeline
+from chronotick.inference.tsfm_model_wrapper import create_model_wrappers
 
 print("=" * 60)
 print("Quick API Test")
 print("=" * 60)
 
-config_path = "chronotick_inference/config.yaml"
+config_path = "configs/config.yaml"
 
 # Initialize
 print("\n1. Initializing engine...")

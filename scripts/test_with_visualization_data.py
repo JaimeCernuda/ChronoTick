@@ -23,17 +23,17 @@ logger = logging.getLogger(__name__)
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from chronotick_inference.engine import ChronoTickInferenceEngine
-from chronotick_inference.real_data_pipeline import RealDataPipeline
-from chronotick_inference.tsfm_model_wrapper import create_model_wrappers
-from chronotick_inference.dataset_correction_logger import DatasetCorrectionLogger, ClientPredictionLogger
+from chronotick.inference.engine import ChronoTickInferenceEngine
+from chronotick.inference.real_data_pipeline import RealDataPipeline
+from chronotick.inference.tsfm_model_wrapper import create_model_wrappers
+from chronotick.inference.dataset_correction_logger import DatasetCorrectionLogger, ClientPredictionLogger
 
 # Parse arguments
 parser = argparse.ArgumentParser(description='Test with visualization data')
 parser.add_argument('method', choices=['none', 'linear', 'drift_aware', 'advanced', 'advance_absolute', 'backtracking'])
 parser.add_argument('--duration', type=int, default=1500, help='Test duration in seconds')
 parser.add_argument('--interval', type=int, default=10, help='Sampling interval')
-parser.add_argument('--config', type=str, default='chronotick_inference/config_complete.yaml',
+parser.add_argument('--config', type=str, default='configs/config_complete.yaml',
                     help='Config file to use')
 parser.add_argument('--output-dir', type=str, default='results/ntp_correction_experiment/visualization_data',
                     help='Output directory for results')
@@ -72,7 +72,7 @@ if config.get('covariates', {}).get('enabled', False):
     covars = config.get('covariates', {}).get('variables', [])
     print(f"  Variables: {', '.join(covars) if covars else 'None'}")
 
-temp_config_path = f"chronotick_inference/config_test_{args.method}.yaml"
+temp_config_path = f"configs/config_test_{args.method}.yaml"
 with open(temp_config_path, 'w') as f:
     yaml.dump(config, f)
 

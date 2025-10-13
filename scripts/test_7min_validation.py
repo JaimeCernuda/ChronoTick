@@ -12,9 +12,9 @@ from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from chronotick_inference.engine import ChronoTickInferenceEngine
-from chronotick_inference.real_data_pipeline import RealDataPipeline
-from chronotick_inference.tsfm_model_wrapper import create_model_wrappers
+from chronotick.inference.engine import ChronoTickInferenceEngine
+from chronotick.inference.real_data_pipeline import RealDataPipeline
+from chronotick.inference.tsfm_model_wrapper import create_model_wrappers
 
 print("=" * 80)
 print("7-MINUTE VALIDATION TEST - IPC Timeout Fix Verification")
@@ -23,7 +23,7 @@ print(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 print()
 
 # Initialize pipeline
-config_path = "chronotick_inference/config_complete.yaml"
+config_path = "configs/config_complete.yaml"
 
 print("Initializing ChronoTick system...")
 engine = ChronoTickInferenceEngine(config_path)

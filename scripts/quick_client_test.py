@@ -22,9 +22,9 @@ logging.basicConfig(
 )
 
 # Enable debug for critical modules to trace call chain
-logging.getLogger('chronotick_inference.real_data_pipeline').setLevel(logging.DEBUG)
-logging.getLogger('chronotick_inference.predictive_scheduler').setLevel(logging.DEBUG)
-logging.getLogger('chronotick_inference.tsfm_model_wrapper').setLevel(logging.DEBUG)
+logging.getLogger('chronotick.inference.real_data_pipeline').setLevel(logging.DEBUG)
+logging.getLogger('chronotick.inference.predictive_scheduler').setLevel(logging.DEBUG)
+logging.getLogger('chronotick.inference.tsfm_model_wrapper').setLevel(logging.DEBUG)
 logging.getLogger('ChronoTick').setLevel(logging.DEBUG)
 
 import chronotick
@@ -36,7 +36,7 @@ print("=" * 80)
 print()
 
 # Configuration - using config_complete.yaml with all required sections
-config_path = str(Path(__file__).parent.parent / "chronotick_inference" / "config_complete.yaml")
+config_path = str(Path(__file__).parent.parent / "configs" / "config_complete.yaml")
 
 # Step 1: Start ChronoTick
 print("Step 1: Starting ChronoTick...")

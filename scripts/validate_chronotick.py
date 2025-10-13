@@ -20,7 +20,7 @@ from pathlib import Path
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from chronotick_inference.real_data_pipeline import RealDataPipeline
+from chronotick.inference.real_data_pipeline import RealDataPipeline
 
 
 @dataclass
@@ -38,7 +38,7 @@ class TimeComparison:
 class ChronoTickValidator:
     """Validates ChronoTick accuracy against NTP and system clock."""
 
-    def __init__(self, config_path: str = "chronotick_inference/config.yaml"):
+    def __init__(self, config_path: str = "configs/config.yaml"):
         self.config_path = config_path
         self.ntp_client = ntplib.NTPClient()
         self.ntp_server = "pool.ntp.org"
@@ -296,8 +296,8 @@ def main():
     parser.add_argument(
         "--config",
         type=str,
-        default="chronotick_inference/config.yaml",
-        help="ChronoTick config path (default: chronotick_inference/config.yaml)"
+        default="configs/config.yaml",
+        help="ChronoTick config path (default: configs/config.yaml)"
     )
     parser.add_argument(
         "--ntp-server",
