@@ -238,9 +238,31 @@ class PredictionFusionEngine:
                 fused_offset_unc = max(cpu_correction.offset_uncertainty, gpu_correction.offset_uncertainty)
             
             # Drift uncertainty combination
-            fused_drift_unc = (final_cpu_weight * cpu_correction.drift_uncertainty + 
+            fused_drift_unc = (final_cpu_weight * cpu_correction.drift_uncertainty +
                               final_gpu_weight * gpu_correction.drift_uncertainty)
-        
+
+        # Fuse quantiles if available from both models
+        fused_quantiles = None
+        if cpu_correction.quantiles and gpu_correction.quantiles:
+            # Find common quantile levels
+            common_levels = set(cpu_correction.quantiles.keys()) & set(gpu_correction.quantiles.keys())
+            if common_levels:
+                fused_quantiles = {}
+                for q_level in common_levels:
+                    # Fuse quantiles using the same weights as predictions
+                    if not self.uncertainty_weighting:
+                        fused_quantiles[q_level] = (cpu_weight * cpu_correction.quantiles[q_level] +
+                                                    gpu_weight * gpu_correction.quantiles[q_level])
+                    else:
+                        fused_quantiles[q_level] = (final_cpu_weight * cpu_correction.quantiles[q_level] +
+                                                    final_gpu_weight * gpu_correction.quantiles[q_level])
+        elif cpu_correction.quantiles:
+            # Only CPU has quantiles
+            fused_quantiles = cpu_correction.quantiles.copy() if cpu_correction.quantiles else None
+        elif gpu_correction.quantiles:
+            # Only GPU has quantiles
+            fused_quantiles = gpu_correction.quantiles.copy() if gpu_correction.quantiles else None
+
         return CorrectionWithBounds(
             offset_correction=fused_offset,
             drift_rate=fused_drift,
@@ -249,7 +271,8 @@ class PredictionFusionEngine:
             prediction_time=time.time(),
             valid_until=max(cpu_correction.valid_until, gpu_correction.valid_until),
             confidence=(cpu_weight * cpu_correction.confidence + gpu_weight * gpu_correction.confidence),
-            source="fusion"
+            source="fusion",
+            quantiles=fused_quantiles
         )
 
 
@@ -263,7 +286,7 @@ class DatasetManager:
         """Initialize dataset manager"""
         self.measurement_dataset = {}  # timestamp -> {offset, drift, source, uncertainty}
         self.prediction_history = []   # List of (timestamp, prediction) tuples
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()  # Use reentrant lock to allow nested lock acquisition
         
     def add_ntp_measurement(self, measurement: NTPMeasurement):
         """Add real NTP measurement to dataset"""
@@ -324,49 +347,529 @@ class DatasetManager:
                         'corrected': False
                     }
     
+    def apply_ntp_correction(self, ntp_measurement: NTPMeasurement, method: str = 'linear',
+                            offset_uncertainty: float = 0.001, drift_uncertainty: float = 0.0001):
+        """
+        Apply dataset-only NTP correction using one of three methods.
+
+        This corrects the historical dataset so that future autoregressive predictions
+        automatically align with NTP ground truth.
+
+        Args:
+            ntp_measurement: New NTP measurement (ground truth)
+            method: Correction method - 'none', 'linear', 'drift_aware', or 'advanced'
+            offset_uncertainty: ML model's offset uncertainty (for drift_aware, advanced)
+            drift_uncertainty: ML model's drift uncertainty (for drift_aware, advanced)
+
+        Returns:
+            dict: Correction metadata with keys:
+                - error: Measured error (NTP_truth - Prediction)
+                - interval_start: Start of correction interval
+                - interval_end: End of correction interval (NTP timestamp)
+                - interval_duration: Duration of interval in seconds
+                - method: Correction method used
+                Returns None if method='none' or no prediction found
+        """
+        if method == 'none':
+            # Just add NTP measurement, no correction
+            self.add_ntp_measurement(ntp_measurement)
+            return None
+
+        with self.lock:
+            # Find the most recent prediction before NTP
+            prediction_at_ntp = self.get_measurement_at_time(ntp_measurement.timestamp)
+            if not prediction_at_ntp:
+                logger.warning(f"[NTP_CORRECTION] No prediction at NTP time {ntp_measurement.timestamp}, just adding NTP")
+                self.add_ntp_measurement(ntp_measurement)
+                return None
+
+            # Calculate error: error = NTP_truth - Prediction
+            error = ntp_measurement.offset - prediction_at_ntp['offset']
+
+            # Find interval start (last NTP or first prediction)
+            interval_start = None
+            for ts in sorted(self.measurement_dataset.keys()):
+                if ts < ntp_measurement.timestamp:
+                    data = self.measurement_dataset[ts]
+                    if data['source'] == 'ntp_measurement':
+                        interval_start = ts
+
+            if interval_start is None:
+                # No previous NTP, use first prediction
+                interval_start = min(self.measurement_dataset.keys())
+
+            interval_duration = ntp_measurement.timestamp - interval_start
+
+            logger.info(f"[NTP_CORRECTION_{method.upper()}] Applying correction: "
+                       f"error={error*1000:.2f}ms over {interval_duration:.0f}s "
+                       f"[{interval_start:.0f} → {ntp_measurement.timestamp:.0f}]")
+
+            # Apply correction based on method
+            if method == 'linear':
+                self._apply_linear_correction(interval_start, ntp_measurement.timestamp, error)
+            elif method == 'drift_aware':
+                self._apply_drift_aware_correction(
+                    interval_start, ntp_measurement.timestamp, error,
+                    offset_uncertainty, drift_uncertainty, interval_duration
+                )
+            elif method == 'advanced':
+                self._apply_advanced_correction(
+                    interval_start, ntp_measurement.timestamp, error,
+                    ntp_measurement.uncertainty, offset_uncertainty, drift_uncertainty
+                )
+            elif method == 'advance_absolute':
+                self._apply_advance_absolute_correction(
+                    interval_start, ntp_measurement.timestamp, error,
+                    ntp_measurement.uncertainty, offset_uncertainty, drift_uncertainty, interval_duration
+                )
+            elif method == 'backtracking':
+                self._apply_backtracking_correction(
+                    interval_start, ntp_measurement.timestamp, error, interval_duration
+                )
+            else:
+                logger.error(f"Unknown correction method: {method}")
+                return None
+
+            # Add the new NTP measurement
+            self.add_ntp_measurement(ntp_measurement)
+
+            logger.info(f"[NTP_CORRECTION_{method.upper()}] Correction applied to "
+                       f"{int(ntp_measurement.timestamp - interval_start)} measurements")
+
+            # Return correction metadata for logging
+            return {
+                'error': error,
+                'interval_start': interval_start,
+                'interval_end': ntp_measurement.timestamp,
+                'interval_duration': interval_duration,
+                'method': method
+            }
+
+    def _apply_linear_correction(self, start_time: float, end_time: float, error: float):
+        """
+        Apply linear retrospective correction.
+
+        Distributes error linearly across time:
+        correction(t) = (t - start) / (end - start) × error
+        """
+        interval_duration = end_time - start_time
+
+        for timestamp in range(int(start_time), int(end_time)):
+            if timestamp in self.measurement_dataset:
+                # Linear weight: α = (t_i - t_start) / (t_end - t_start)
+                alpha = (timestamp - start_time) / interval_duration if interval_duration > 0 else 0
+
+                # Apply correction: ô_t_i'' ← ô_t_i + α · δ
+                self.measurement_dataset[timestamp]['offset'] += alpha * error
+                self.measurement_dataset[timestamp]['corrected'] = True
+
+    def _apply_drift_aware_correction(self, start_time: float, end_time: float, error: float,
+                                     σ_offset: float, σ_drift: float, Δt: float):
+        """
+        Apply drift-aware retrospective correction.
+
+        Attributes error to both offset and drift based on uncertainty:
+        - offset_correction: based on offset uncertainty
+        - drift_correction: based on drift uncertainty accumulated over time
+
+        correction(t) = offset_corr + drift_corr × (t - start)
+        """
+        # Variance contributions
+        var_offset = σ_offset ** 2
+        var_drift = (σ_drift * Δt) ** 2
+        var_total = var_offset + var_drift
+
+        if var_total == 0:
+            # Fallback to linear if no uncertainty info
+            self._apply_linear_correction(start_time, end_time, error)
+            return
+
+        # Weight allocation based on uncertainty
+        w_offset = var_offset / var_total
+        w_drift = var_drift / var_total
+
+        # Attribute error to offset and drift
+        offset_correction = w_offset * error
+        drift_correction = (w_drift * error) / Δt if Δt > 0 else 0.0
+
+        logger.info(f"[DRIFT_AWARE] w_offset={w_offset:.3f}, w_drift={w_drift:.3f}, "
+                   f"offset_corr={offset_correction*1000:.2f}ms, "
+                   f"drift_corr={drift_correction*1e6:.2f}μs/s")
+
+        # Apply to each timestamp
+        for timestamp in range(int(start_time), int(end_time)):
+            if timestamp in self.measurement_dataset:
+                # Time since interval start
+                t_elapsed = timestamp - start_time
+
+                # Combined correction: offset + drift × time
+                correction = offset_correction + (drift_correction * t_elapsed)
+
+                self.measurement_dataset[timestamp]['offset'] += correction
+                self.measurement_dataset[timestamp]['drift'] += drift_correction  # Also adjust drift
+                self.measurement_dataset[timestamp]['corrected'] = True
+
+    def _apply_advanced_correction(self, start_time: float, end_time: float, error: float,
+                                   sigma_measurement: float, sigma_prediction: float, sigma_drift: float):
+        """
+        Advanced correction using full temporal uncertainty model with confidence degradation.
+
+        This method models how measurement confidence degrades over time since the last
+        NTP synchronization. Points further from the last sync have accumulated more
+        uncertainty and are corrected more aggressively toward the new NTP ground truth.
+
+        Uncertainty model:
+            sigma_total^2(t) = sigma_measurement^2 + sigma_prediction^2 + (sigma_drift * delta_t)^2
+
+        where delta_t is time elapsed since last NTP sync. The quadratic growth of drift
+        uncertainty reflects physical clock behavior. Corrections are weighted inversely
+        to confidence: high uncertainty → low confidence → more correction.
+
+        Args:
+            start_time: Start of interval (last NTP sync)
+            end_time: End of interval (new NTP measurement)
+            error: Measured error at end_time (NTP_truth - Prediction)
+            sigma_measurement: NTP measurement uncertainty (seconds)
+            sigma_prediction: ML model prediction uncertainty (seconds)
+            sigma_drift: Drift rate uncertainty (seconds/second)
+        """
+        interval_duration = end_time - start_time
+
+        # Base uncertainty (non-temporal components)
+        sigma_squared_base = sigma_measurement**2 + sigma_prediction**2
+
+        logger.info(f"[ADVANCED] Starting advanced correction over {interval_duration:.0f}s interval")
+        logger.info(f"[ADVANCED] sigma_measurement={sigma_measurement*1000:.2f}ms, "
+                   f"sigma_prediction={sigma_prediction*1000:.2f}ms, "
+                   f"sigma_drift={sigma_drift*1e6:.2f}μs/s")
+
+        # Calculate time-dependent uncertainty and weights
+        total_weight = 0.0
+        weights = {}
+        max_sigma_squared_total = 0.0
+        min_sigma_squared_total = float('inf')
+
+        # FIXED: Include end_time by adding +1 to range
+        for timestamp in range(int(start_time), int(end_time) + 1):
+            if timestamp in self.measurement_dataset:
+                # Time elapsed since last sync
+                delta_t = timestamp - start_time
+
+                # Temporal uncertainty growth (quadratic with time)
+                sigma_squared_temporal = (sigma_drift * delta_t)**2
+
+                # Total uncertainty at this timestamp
+                sigma_squared_total = sigma_squared_base + sigma_squared_temporal
+
+                # FIXED: Use DIRECT variance weighting for advanced method
+                # Concept: Points with HIGH uncertainty (far from last NTP) get MORE correction
+                # Points with LOW uncertainty (near last NTP) get LESS correction
+                # This is opposite of inverse-variance used in fusion!
+                weight = sigma_squared_total
+                weights[timestamp] = weight
+                total_weight += weight
+                max_sigma_squared_total = max(max_sigma_squared_total, sigma_squared_total)
+                min_sigma_squared_total = min(min_sigma_squared_total, sigma_squared_total)
+
+        logger.info(f"[ADVANCED] Uncertainty range: {math.sqrt(min_sigma_squared_total)*1000:.2f}ms "
+                   f"to {math.sqrt(max_sigma_squared_total)*1000:.2f}ms")
+
+        # Normalize and apply corrections
+        correction_count = 0
+        max_correction = 0.0
+        min_correction = float('inf')
+
+        # FIXED: Include end_time by adding +1 to range
+        for timestamp in range(int(start_time), int(end_time) + 1):
+            if timestamp in self.measurement_dataset:
+                # Normalized weight (ensures corrections sum to total error)
+                alpha = weights[timestamp] / total_weight if total_weight > 0 else 0
+
+                # Apply weighted correction
+                correction = alpha * error
+                self.measurement_dataset[timestamp]['offset'] += correction
+                self.measurement_dataset[timestamp]['corrected'] = True
+                correction_count += 1
+                max_correction = max(max_correction, abs(correction))
+                min_correction = min(min_correction, abs(correction))
+
+                # Log sample of corrections (first 3, last 3, and every 30th)
+                if correction_count <= 3 or correction_count % 30 == 0:
+                    delta_t = timestamp - start_time
+                    sigma_squared_total = weights[timestamp]
+                    confidence = 1.0 / (1.0 + sigma_squared_total * 1e6)  # Scale for readability
+                    logger.debug(f"[ADVANCED] t={timestamp}, delta_t={delta_t:3.0f}s, "
+                               f"sigma={math.sqrt(sigma_squared_total)*1000:.2f}ms, "
+                               f"confidence={confidence:.3f}, alpha={alpha:.4f}, "
+                               f"correction={correction*1000:+.2f}ms")
+
+        logger.info(f"[ADVANCED] Applied to {correction_count} measurements")
+        logger.info(f"[ADVANCED] Correction range: {min_correction*1000:.2f}ms "
+                   f"to {max_correction*1000:.2f}ms")
+
+    def _apply_advance_absolute_correction(self, start_time: float, end_time: float, error: float,
+                                          sigma_measurement: float, sigma_prediction: float,
+                                          sigma_drift: float, interval_duration: float):
+        """
+        Advanced Absolute correction: Per-point directional correction toward target line.
+
+        Goal: "Nudge the system closer to the line between two successive NTP measurements proportionally.
+        If we went above that line we go down, if we went below we go up. Avoids over-corrections
+        that push errors that went up more up (if error is positive) or errors that went down more
+        down (if error is negative)."
+
+        Key innovation: PER-POINT directional correction
+        - Calculate target line: y_target(t) = E × (t - t_start) / Δt (linear from 0 to E)
+        - For each point: deviation = y_current - y_target
+        - If deviation > 0 (ABOVE line): correction is NEGATIVE (push DOWN toward line)
+        - If deviation < 0 (BELOW line): correction is POSITIVE (push UP toward line)
+
+        This prevents over-correction by bringing ALL points closer to the ideal line, not pushing
+        everything in the same direction based on endpoint error.
+
+        Uses uncertainty weighting (same as 'advanced'):
+        - Points with HIGH uncertainty get MORE correction
+        - Points with LOW uncertainty get LESS correction
+
+        Args:
+            start_time: Start of interval (last NTP sync, where target line = 0)
+            end_time: End of interval (new NTP measurement, where target line = E)
+            error: Measured point error at end_time (NTP_truth - Prediction)
+            sigma_measurement: NTP measurement uncertainty (seconds)
+            sigma_prediction: ML model prediction uncertainty (seconds)
+            sigma_drift: Drift rate uncertainty (seconds/second)
+            interval_duration: Duration of interval in seconds
+        """
+        logger.info(f"[ADVANCE_ABSOLUTE] Starting advance_absolute correction (v4 - per-point directional)")
+        logger.info(f"[ADVANCE_ABSOLUTE] Endpoint error: {error*1000:.2f}ms over {interval_duration:.0f}s")
+        logger.info(f"[ADVANCE_ABSOLUTE] Target: Linear line from 0 to {error*1000:.2f}ms")
+        logger.info(f"[ADVANCE_ABSOLUTE] Method: Bring each point closer to target line")
+
+        # Base uncertainty (non-temporal components)
+        sigma_squared_base = sigma_measurement**2 + sigma_prediction**2
+
+        # Calculate per-point deviations from target line and uncertainty weights
+        total_weight = 0.0
+        weights = {}
+        deviations = {}
+        total_absolute_deviation = 0.0
+
+        for timestamp in range(int(start_time), int(end_time) + 1):
+            if timestamp in self.measurement_dataset:
+                delta_t = timestamp - start_time
+
+                # Target offset on the ideal line (linear from 0 to E)
+                target_offset = error * delta_t / interval_duration if interval_duration > 0 else 0
+
+                # Current offset at this timestamp
+                current_offset = self.measurement_dataset[timestamp]['offset']
+
+                # Deviation from target line
+                # Positive deviation = point is ABOVE line (need to push DOWN)
+                # Negative deviation = point is BELOW line (need to push UP)
+                deviation = current_offset - target_offset
+                deviations[timestamp] = deviation
+                total_absolute_deviation += abs(deviation)
+
+                # Uncertainty weighting (same as 'advanced')
+                sigma_squared_temporal = (sigma_drift * delta_t)**2
+                sigma_squared_total = sigma_squared_base + sigma_squared_temporal
+                weight = sigma_squared_total
+                weights[timestamp] = weight
+                total_weight += weight
+
+        logger.info(f"[ADVANCE_ABSOLUTE] Total absolute deviation from line: {total_absolute_deviation*1000:.2f}ms")
+        logger.info(f"[ADVANCE_ABSOLUTE] Goal: Reduce this by correcting each point toward line")
+
+        # Apply corrections: bring each point toward the target line
+        correction_count = 0
+        max_correction = 0.0
+        min_correction = float('inf')
+        total_correction_applied = 0.0
+        corrections_up = 0
+        corrections_down = 0
+
+        for timestamp in range(int(start_time), int(end_time) + 1):
+            if timestamp in self.measurement_dataset:
+                delta_t = timestamp - start_time
+                deviation = deviations[timestamp]
+
+                # Normalized uncertainty weight
+                alpha = weights[timestamp] / total_weight if total_weight > 0 else 0
+
+                # Correction = weighted share of deviation (with OPPOSITE sign to bring toward line)
+                # If deviation > 0 (above line): correction < 0 (push down)
+                # If deviation < 0 (below line): correction > 0 (push up)
+                correction = -alpha * deviation * (len(weights) / 2.0)  # Scale by N/2 for accumulated error concept
+
+                # Apply correction
+                self.measurement_dataset[timestamp]['offset'] += correction
+                self.measurement_dataset[timestamp]['corrected'] = True
+
+                correction_count += 1
+                max_correction = max(max_correction, abs(correction))
+                if abs(correction) > 0:
+                    min_correction = min(min_correction, abs(correction))
+                total_correction_applied += correction
+
+                if correction > 0:
+                    corrections_up += 1
+                elif correction < 0:
+                    corrections_down += 1
+
+                # Log sample
+                if correction_count <= 5 or correction_count % 30 == 0:
+                    target_offset = error * delta_t / interval_duration if interval_duration > 0 else 0
+                    direction = "↓ DOWN" if correction < 0 else "↑ UP  "
+                    logger.debug(f"[ADVANCE_ABSOLUTE] t={timestamp}, Δt={delta_t:3.0f}s, "
+                               f"target={target_offset*1000:+.2f}ms, dev={deviation*1000:+.2f}ms, "
+                               f"corr={correction*1000:+.2f}ms {direction}")
+
+        logger.info(f"[ADVANCE_ABSOLUTE] Applied to {correction_count} measurements")
+        logger.info(f"[ADVANCE_ABSOLUTE] Corrections UP: {corrections_up}, DOWN: {corrections_down}")
+        logger.info(f"[ADVANCE_ABSOLUTE] Correction range: {min_correction*1000:.2f}ms to {max_correction*1000:.2f}ms")
+        logger.info(f"[ADVANCE_ABSOLUTE] Total correction applied: {total_correction_applied*1000:.2f}ms")
+        logger.info(f"[ADVANCE_ABSOLUTE] This brings all points closer to the ideal NTP line")
+
+    def _apply_backtracking_correction(self, start_time: float, end_time: float, error: float, interval_duration: float):
+        """
+        Backtracking Learning Correction: REPLACE predictions with interpolated NTP ground truth.
+
+        Key Innovation: Make the dataset look like "what NTP would have measured" at each point.
+
+        This method REPLACES all predictions between NTP measurements with linearly
+        interpolated values based on the two NTP boundaries. This gives the ML model
+        an NTP-aligned dataset to learn from for future predictions.
+
+        Example:
+        - NTP measurement at t=0: offset=10ms
+        - NTP measurement at t=5: offset=20ms
+        - ML predicted at t=[1,2,3,4]: [11,12,13,14]ms
+        - After correction: REPLACE with [12,14,16,18]ms (linear interpolation)
+
+        Philosophy:
+        - STRONGER correction (not weaker) for better NTP alignment
+        - Dataset becomes "NTP-like" so future predictions stay aligned
+        - Combined with enhanced NTP (better accuracy) = winning algorithm
+
+        Args:
+            start_time: Start of interval (last NTP measurement timestamp)
+            end_time: End of interval (new NTP measurement timestamp)
+            error: Measured error at end_time (NTP_truth - Prediction)
+            interval_duration: Duration of interval in seconds
+        """
+        logger.info(f"[BACKTRACKING] Starting backtracking learning correction")
+        logger.info(f"[BACKTRACKING] Error: {error*1000:.2f}ms over {interval_duration:.0f}s")
+        logger.info(f"[BACKTRACKING] Strategy: REPLACE predictions with interpolated NTP")
+
+        # Get the NTP offset at the start of the interval
+        # This is the last NTP measurement that was added
+        start_ntp_offset = None
+        if int(start_time) in self.measurement_dataset:
+            start_ntp_offset = self.measurement_dataset[int(start_time)]['offset']
+        else:
+            logger.warning(f"[BACKTRACKING] No measurement at start_time {start_time:.0f}, skipping correction")
+            return
+
+        # Calculate the NTP offset at the end (current NTP measurement)
+        # end_ntp_offset = start_ntp_offset + error
+        # But we need to get the PREDICTION at end_time first
+        end_prediction_offset = None
+        if int(end_time) in self.measurement_dataset:
+            end_prediction_offset = self.measurement_dataset[int(end_time)]['offset']
+
+        # If no prediction at exact end_time, find closest
+        if end_prediction_offset is None:
+            for ts in sorted(self.measurement_dataset.keys(), reverse=True):
+                if ts <= int(end_time):
+                    end_prediction_offset = self.measurement_dataset[ts]['offset']
+                    break
+
+        if end_prediction_offset is None:
+            logger.warning(f"[BACKTRACKING] No prediction near end_time {end_time:.0f}, skipping correction")
+            return
+
+        # The new NTP measurement is: end_ntp_offset = end_prediction_offset + error
+        end_ntp_offset = end_prediction_offset + error
+
+        logger.info(f"[BACKTRACKING] NTP boundaries: start={start_ntp_offset*1000:.2f}ms @ t={start_time:.0f}, "
+                   f"end={end_ntp_offset*1000:.2f}ms @ t={end_time:.0f}")
+        logger.info(f"[BACKTRACKING] Interpolating between these values for all predictions in interval")
+
+        # REPLACE all predictions with linearly interpolated NTP values
+        correction_count = 0
+        max_replacement = 0.0
+        min_replacement = float('inf')
+
+        for timestamp in range(int(start_time) + 1, int(end_time)):
+            if timestamp in self.measurement_dataset:
+                # Calculate interpolation weight
+                alpha = (timestamp - start_time) / interval_duration if interval_duration > 0 else 0
+
+                # Calculate what NTP "would have measured" at this point
+                ntp_interpolated = start_ntp_offset + alpha * (end_ntp_offset - start_ntp_offset)
+
+                # Get current prediction
+                current_offset = self.measurement_dataset[timestamp]['offset']
+
+                # Calculate replacement delta for logging
+                replacement_delta = ntp_interpolated - current_offset
+
+                # REPLACE prediction with interpolated NTP value
+                self.measurement_dataset[timestamp]['offset'] = ntp_interpolated
+                self.measurement_dataset[timestamp]['corrected'] = True
+
+                correction_count += 1
+                max_replacement = max(max_replacement, abs(replacement_delta))
+                if abs(replacement_delta) > 0:
+                    min_replacement = min(min_replacement, abs(replacement_delta))
+
+                # Log sample of replacements (first 3, last 3, and every 30th)
+                if correction_count <= 3 or correction_count % 30 == 0:
+                    logger.debug(f"[BACKTRACKING] t={timestamp}, alpha={alpha:.3f}, "
+                               f"was={current_offset*1000:.2f}ms → now={ntp_interpolated*1000:.2f}ms "
+                               f"(delta={replacement_delta*1000:+.2f}ms)")
+
+        logger.info(f"[BACKTRACKING] REPLACED {correction_count} predictions with NTP-interpolated values")
+        if correction_count > 0:
+            logger.info(f"[BACKTRACKING] Replacement range: {min_replacement*1000:.2f}ms to {max_replacement*1000:.2f}ms")
+        logger.info(f"[BACKTRACKING] Dataset now looks like 'what NTP would have measured'")
+        logger.info(f"[BACKTRACKING] Future predictions will learn from this NTP-aligned dataset")
+
     def apply_retrospective_correction(self, ntp_measurement: NTPMeasurement,
                                      interval_start: float):
         """
-        Apply design.md Algorithm 1: Retrospective Bias Correction
-        
-        δ ← o_t - ô_t
-        For i ← 0 to n:
-            α ← (t_i - t_start) / (t_end - t_start)  # Linear weighting
-            ô_t_i'' ← ô_t_i + α · δ
+        DEPRECATED: Use apply_ntp_correction() instead.
+        Kept for backward compatibility.
         """
-        with self.lock:
-            # Calculate prediction error
-            prediction_at_ntp_time = self.get_measurement_at_time(ntp_measurement.timestamp)
-            if not prediction_at_ntp_time:
-                logger.warning("No prediction available for retrospective correction")
-                return
-            
-            prediction_error = ntp_measurement.offset - prediction_at_ntp_time['offset']
-            
-            logger.info(f"Applying retrospective correction: error={prediction_error*1e6:.1f}μs "
-                       f"over interval [{interval_start}, {ntp_measurement.timestamp}]")
-            
-            # Apply linear weighting correction (design.md Algorithm 1)
-            interval_duration = ntp_measurement.timestamp - interval_start
-            
-            for timestamp in range(int(interval_start), int(ntp_measurement.timestamp)):
-                if timestamp in self.measurement_dataset:
-                    # Calculate linear weight: α = (t_i - t_start) / (t_end - t_start)
-                    alpha = (timestamp - interval_start) / interval_duration if interval_duration > 0 else 0
-                    
-                    # Apply correction: ô_t_i'' ← ô_t_i + α · δ
-                    self.measurement_dataset[timestamp]['offset'] += alpha * prediction_error
-                    self.measurement_dataset[timestamp]['corrected'] = True
-            
-            # Add the new NTP measurement
-            self.add_ntp_measurement(ntp_measurement)
-            
-            logger.debug(f"Retrospective correction applied to {int(ntp_measurement.timestamp - interval_start)} measurements")
+        self.apply_ntp_correction(ntp_measurement, method='linear')
     
     def get_measurement_at_time(self, timestamp: float) -> Optional[dict]:
-        """Get measurement data at specific timestamp"""
+        """
+        Get the most recent prediction measurement before the given timestamp.
+
+        This is used by apply_ntp_correction() to find the prediction that should
+        be compared against the new NTP ground truth.
+
+        Args:
+            timestamp: Target timestamp to find measurement before
+
+        Returns:
+            Most recent prediction measurement before timestamp, or None if none found
+        """
         with self.lock:
-            return self.measurement_dataset.get(int(timestamp))
+            # Find the most recent measurement (any source) before timestamp
+            candidates = []
+            for ts, data in self.measurement_dataset.items():
+                if ts <= int(timestamp):  # Must be at or before NTP time
+                    candidates.append((ts, data))
+
+            if not candidates:
+                return None
+
+            # Return the most recent (highest timestamp)
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            return candidates[0][1]
     
     def get_recent_measurements(self, window_seconds: int = None) -> List[Tuple[float, float]]:
         """
@@ -445,16 +948,17 @@ class RealDataPipeline:
         fusion_config = config.get('prediction_scheduling', {}).get('fusion', {})
         self.fusion_engine = PredictionFusionEngine(fusion_config)
 
-        # NTP Correction Configuration
+        # NTP Correction Configuration - Dataset-Only Correction
         ntp_correction_config = config.get('prediction_scheduling', {}).get('ntp_correction', {})
         self.ntp_correction_enabled = ntp_correction_config.get('enabled', True)
-        self.ntp_correction_method = ntp_correction_config.get('method', 'inverse_variance')
-        self.max_ntp_age = ntp_correction_config.get('max_ntp_age_seconds', 300)
-        self.min_ntp_confidence = ntp_correction_config.get('min_ntp_confidence', 0.5)
-        self.ntp_uncertainty_growth_rate = ntp_correction_config.get('uncertainty_growth_rate', 0.00001)
+        self.ntp_correction_method = ntp_correction_config.get('method', 'linear')
+        self.ntp_offset_uncertainty = ntp_correction_config.get('offset_uncertainty', 0.001)
+        self.ntp_drift_uncertainty = ntp_correction_config.get('drift_uncertainty', 0.0001)
 
-        logger.info(f"NTP Correction: enabled={self.ntp_correction_enabled}, "
-                   f"method={self.ntp_correction_method}, max_age={self.max_ntp_age}s")
+        logger.info(f"NTP Correction (Dataset-Only): enabled={self.ntp_correction_enabled}, "
+                   f"method={self.ntp_correction_method}, "
+                   f"offset_unc={self.ntp_offset_uncertainty*1000:.2f}ms, "
+                   f"drift_unc={self.ntp_drift_uncertainty*1e6:.2f}μs/s")
 
         # Pipeline state
         self.initialized = False
@@ -596,7 +1100,12 @@ class RealDataPipeline:
     
     @debug_trace_pipeline(include_args=True, include_result=False, include_timing=True)
     def _check_for_ntp_updates(self, current_time: float):
-        """Check for new NTP measurements and add ALL of them to dataset"""
+        """
+        Check for new NTP measurements and apply dataset-only correction.
+
+        This is the ONLY place where NTP correction happens - by correcting
+        the historical dataset. NO real-time blending!
+        """
         logger.debug(f"_check_for_ntp_updates called: current_time={current_time}, "
                     f"last_processed_count={self.last_processed_ntp_count}")
 
@@ -609,9 +1118,9 @@ class RealDataPipeline:
         # Process any new measurements we haven't seen yet
         if len(all_measurements) > self.last_processed_ntp_count:
             new_measurements = all_measurements[self.last_processed_ntp_count:]
-            logger.info(f"Found {len(new_measurements)} new NTP measurements to add to dataset")
+            logger.info(f"Found {len(new_measurements)} new NTP measurements to process")
 
-            # Add each new measurement to the dataset
+            # Apply dataset correction for each new NTP measurement
             for timestamp, offset, uncertainty in new_measurements:
                 # Create NTPMeasurement object
                 ntp_measurement = NTPMeasurement(
@@ -624,12 +1133,29 @@ class RealDataPipeline:
                     uncertainty=uncertainty
                 )
 
-                self.dataset_manager.add_ntp_measurement(ntp_measurement)
-                logger.debug(f"Added NTP measurement to dataset: timestamp={timestamp}, offset={offset:.6f}s")
+                # Apply dataset-only correction using configured method
+                # SKIP correction during warmup (no predictions to correct yet)
+                if self.ntp_correction_enabled and self.warm_up_complete:
+                    # Use uncertainties from configuration
+                    self.dataset_manager.apply_ntp_correction(
+                        ntp_measurement,
+                        method=self.ntp_correction_method,
+                        offset_uncertainty=self.ntp_offset_uncertainty,
+                        drift_uncertainty=self.ntp_drift_uncertainty
+                    )
+                else:
+                    # Just add NTP without correction (warmup or correction disabled)
+                    self.dataset_manager.add_ntp_measurement(ntp_measurement)
+                    if not self.warm_up_complete:
+                        logger.debug(f"[NTP_WARMUP] Skipping correction during warmup phase")
 
-                # Track latest NTP for real-time correction
+                # Track latest NTP
                 with self.lock:
                     self.stats['ntp_measurements'] += 1
+                    if self.ntp_correction_enabled and self.warm_up_complete:
+                        self.stats['ntp_corrections_applied'] += 1
+                    else:
+                        self.stats['ntp_corrections_skipped'] += 1
                     self.last_ntp_time = timestamp
                     self.last_ntp_offset = offset
                     self.last_ntp_uncertainty = uncertainty
@@ -639,100 +1165,9 @@ class RealDataPipeline:
 
             logger.info(f"Dataset now has {len(self.dataset_manager.get_recent_measurements())} measurements")
             logger.info(f"Latest NTP: t={self.last_ntp_time:.0f}, offset={self.last_ntp_offset*1000:.2f}ms")
-    
-    def _apply_ntp_correction(self, ml_correction: CorrectionWithBounds, current_time: float) -> CorrectionWithBounds:
-        """
-        Blend ML prediction with latest NTP measurement using inverse-variance weighting.
 
-        Args:
-            ml_correction: ML model prediction
-            current_time: Current timestamp
+    # Old real-time blending methods removed - now using dataset-only correction
 
-        Returns:
-            Blended correction combining ML and NTP
-        """
-        if not self.ntp_correction_enabled:
-            with self.lock:
-                self.stats['ntp_corrections_skipped'] += 1
-            return ml_correction
-
-        with self.lock:
-            last_ntp_time = self.last_ntp_time
-            last_ntp_offset = self.last_ntp_offset
-            last_ntp_uncertainty = self.last_ntp_uncertainty
-
-        # Check if we have NTP data
-        if last_ntp_offset is None or last_ntp_time == 0:
-            logger.debug("[NTP_CORRECTION] No NTP data available, using ML-only prediction")
-            with self.lock:
-                self.stats['ntp_corrections_skipped'] += 1
-            return ml_correction
-
-        # Check NTP age
-        ntp_age = current_time - last_ntp_time
-        if ntp_age > self.max_ntp_age:
-            logger.debug(f"[NTP_CORRECTION] NTP too old ({ntp_age:.1f}s > {self.max_ntp_age}s), using ML-only")
-            with self.lock:
-                self.stats['ntp_corrections_skipped'] += 1
-            return ml_correction
-
-        # Calculate NTP uncertainty with growth over time
-        # NTP uncertainty grows as we get further from measurement
-        ntp_uncertainty_now = last_ntp_uncertainty + (ntp_age * self.ntp_uncertainty_growth_rate)
-
-        # Inverse-variance weighting: w_i = 1/σ_i²
-        ml_variance = ml_correction.offset_uncertainty ** 2
-        ntp_variance = ntp_uncertainty_now ** 2
-
-        ml_weight = 1.0 / ml_variance if ml_variance > 0 else 0
-        ntp_weight = 1.0 / ntp_variance if ntp_variance > 0 else 0
-
-        total_weight = ml_weight + ntp_weight
-
-        if total_weight == 0:
-            logger.warning("[NTP_CORRECTION] Both weights are zero, using ML-only")
-            with self.lock:
-                self.stats['ntp_corrections_skipped'] += 1
-            return ml_correction
-
-        # Normalized weights
-        ml_normalized = ml_weight / total_weight
-        ntp_normalized = ntp_weight / total_weight
-
-        # Blended offset: weighted average of ML and NTP
-        blended_offset = (ml_normalized * ml_correction.offset_correction +
-                         ntp_normalized * last_ntp_offset)
-
-        # Blended uncertainty: 1/sqrt(total_inverse_variance)
-        blended_uncertainty = 1.0 / math.sqrt(total_weight)
-
-        # Keep ML drift rate (NTP doesn't provide drift information)
-        blended_drift = ml_correction.drift_rate
-        blended_drift_unc = ml_correction.drift_uncertainty
-
-        # Calculate confidence based on agreement between ML and NTP
-        offset_diff = abs(ml_correction.offset_correction - last_ntp_offset)
-        combined_unc = ml_correction.offset_uncertainty + ntp_uncertainty_now
-        agreement = 1.0 - min(offset_diff / (combined_unc + 1e-9), 1.0)  # 1.0 = perfect agreement
-        blended_confidence = min(ml_correction.confidence, 0.5 + 0.5 * agreement)
-
-        logger.info(f"[NTP_CORRECTION] Applied: ML={ml_correction.offset_correction*1000:.2f}ms (unc={ml_correction.offset_uncertainty*1000:.2f}ms, w={ml_normalized:.3f}), "
-                   f"NTP={last_ntp_offset*1000:.2f}ms (unc={ntp_uncertainty_now*1000:.2f}ms, w={ntp_normalized:.3f}, age={ntp_age:.1f}s), "
-                   f"Blended={blended_offset*1000:.2f}ms (unc={blended_uncertainty*1000:.2f}ms, conf={blended_confidence:.2f})")
-
-        with self.lock:
-            self.stats['ntp_corrections_applied'] += 1
-
-        return CorrectionWithBounds(
-            offset_correction=blended_offset,
-            drift_rate=blended_drift,
-            offset_uncertainty=blended_uncertainty,
-            drift_uncertainty=blended_drift_unc,
-            prediction_time=current_time,
-            valid_until=ml_correction.valid_until,
-            confidence=blended_confidence,
-            source=f"{ml_correction.source}+ntp"
-        )
 
     @debug_trace_pipeline(include_args=True, include_result=True, include_timing=True)
     def _get_warm_up_correction(self, current_time: float) -> CorrectionWithBounds:
@@ -778,20 +1213,18 @@ class RealDataPipeline:
                 self.stats['prediction_cache_hits'] += 1
             logger.info(f"[CACHE_HIT] Using fused correction from cache")
 
-            # Apply NTP correction to blend ML prediction with latest NTP
-            corrected = self._apply_ntp_correction(correction, current_time)
-
-            # CRITICAL: Store prediction in dataset for autoregressive training
+            # NO real-time NTP blending! Dataset correction handles everything.
+            # Just store the prediction and return it.
             self.dataset_manager.add_prediction(
                 timestamp=current_time,
-                offset=corrected.offset_correction,
-                drift=corrected.drift_rate,
-                source=corrected.source,
-                uncertainty=corrected.offset_uncertainty,
-                confidence=corrected.confidence
+                offset=correction.offset_correction,
+                drift=correction.drift_rate,
+                source=correction.source,
+                uncertainty=correction.offset_uncertainty,
+                confidence=correction.confidence
             )
 
-            return corrected
+            return correction
 
         # Fallback: get individual model predictions
         logger.info(f"[CACHE_LOOKUP] Fused correction missed, trying get_correction_at_time...")
@@ -803,20 +1236,18 @@ class RealDataPipeline:
                 self.stats['prediction_cache_hits'] += 1
             logger.info(f"[CACHE_HIT] Using CPU correction from cache")
 
-            # Apply NTP correction to blend ML prediction with latest NTP
-            corrected = self._apply_ntp_correction(cpu_correction, current_time)
-
-            # CRITICAL: Store prediction in dataset for autoregressive training
+            # NO real-time NTP blending! Dataset correction handles everything.
+            # Just store the prediction and return it.
             self.dataset_manager.add_prediction(
                 timestamp=current_time,
-                offset=corrected.offset_correction,
-                drift=corrected.drift_rate,
-                source=corrected.source,
-                uncertainty=corrected.offset_uncertainty,
-                confidence=corrected.confidence
+                offset=cpu_correction.offset_correction,
+                drift=cpu_correction.drift_rate,
+                source=cpu_correction.source,
+                uncertainty=cpu_correction.offset_uncertainty,
+                confidence=cpu_correction.confidence
             )
 
-            return corrected
+            return cpu_correction
 
         # Cache miss - use fallback
         with self.lock:

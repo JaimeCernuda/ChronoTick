@@ -1,16 +1,16 @@
-# ChronoTick Inference Configuration - Complete with all sections
-# CPU Only with TimesFM 2.5 - Includes clock_measurement and prediction_scheduling
+# ChronoTick Enhanced Features Test Configuration
+# Tests: Enhanced NTP (advanced mode) + Backtracking Learning Correction
 
 short_term:
   model_name: timesfm
   device: cpu
   enabled: true
   inference_interval: 1.0
-  prediction_horizon: 30  # Match scheduler's CPU horizon for proper caching
-  context_length: 512  # TimesFM supports up to 2048
+  prediction_horizon: 30
+  context_length: 512
   max_uncertainty: 0.1
   model_params:
-    prediction_length: 30  # Match scheduler's CPU horizon
+    prediction_length: 30
     context_length: 512
     model_repo: "google/timesfm-2.5-200m-pytorch"
     backend: "cpu"
@@ -21,7 +21,7 @@ long_term:
   enabled: true
   inference_interval: 30.0
   prediction_horizon: 60
-  context_length: 512  # TimesFM supports up to 2048
+  context_length: 512
   max_uncertainty: 0.15
   model_params:
     prediction_length: 60
@@ -31,7 +31,7 @@ long_term:
 
 fusion:
   enabled: true
-  method: none  # Options: none, linear, drift_aware, advanced
+  method: none
   uncertainty_threshold: 0.05
   fallback_weights:
     short_term: 0.8
@@ -50,7 +50,7 @@ preprocessing:
     method: zscore
 
 covariates:
-  enabled: false  # DISABLED - will test WITH covariates in Phase 3
+  enabled: false
   variables:
     - cpu_usage
     - temperature
@@ -64,7 +64,7 @@ performance:
   batch_size: 1
 
 logging:
-  level: DEBUG
+  level: INFO  # Changed to INFO to reduce log spam
   log_predictions: true
   log_uncertainty: true
   log_fusion_weights: true
@@ -73,7 +73,7 @@ clock:
   frequency_type: second
   frequency_code: 9
 
-# Clock measurement via NTP - Required by ClockMeasurementCollector
+# Clock measurement via NTP with ENHANCED MODE
 clock_measurement:
   ntp:
     servers:
@@ -84,7 +84,7 @@ clock_measurement:
     max_acceptable_uncertainty: 0.100
     min_stratum: 1
     max_stratum: 16
-    measurement_mode: simple  # "simple" (single query) or "advanced" (2-3 queries with averaging)
+    measurement_mode: advanced  # ENHANCED: 2-3 queries with averaging
   timing:
     warm_up:
       duration_seconds: 60
@@ -92,13 +92,13 @@ clock_measurement:
     normal_operation:
       measurement_interval: 180
 
-# Prediction scheduling - Required by PredictiveScheduler
+# Prediction scheduling with BACKTRACKING CORRECTION
 prediction_scheduling:
   dataset:
     prediction_cache_size: 100
     max_history_size: 1000
   cpu_model:
-    prediction_interval: 5  # Reduced from 1s to reduce GIL contention
+    prediction_interval: 5
     prediction_horizon: 30
     prediction_lead_time: 5
     max_inference_time: 2.0
@@ -108,15 +108,9 @@ prediction_scheduling:
     prediction_lead_time: 10
     max_inference_time: 5.0
 
-  # NTP Correction - Dataset-Only Correction
+  # NTP Correction with BACKTRACKING method
   ntp_correction:
-    enabled: true  # Enable dataset-only NTP correction
-    method: none  # Options: none, linear, drift_aware, advanced
-    # none: No correction, just add NTP
-    # linear: Distribute error linearly over time
-    # drift_aware: Attribute error to offset vs drift based on uncertainty ratio
-    # advanced: Weight corrections by temporal uncertainty degradation
-
-    # Uncertainty parameters (used by drift_aware and advanced methods)
-    offset_uncertainty: 0.001  # Offset uncertainty estimate (1ms)
-    drift_uncertainty: 0.0001  # Drift uncertainty estimate (100μs/s)
+    enabled: true
+    method: backtracking  # ENHANCED: Minimal retrospective, learned bias
+    offset_uncertainty: 0.001
+    drift_uncertainty: 0.0001
