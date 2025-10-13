@@ -1,0 +1,110 @@
+# ChronoTick Inference Configuration - SHORT-TERM ONLY
+# Phase 2 Testing: Evaluate impact of long-term model
+# Configuration: Short-term TimesFM only, NO long-term model, NO covariates
+
+short_term:
+  model_name: timesfm
+  device: cpu
+  enabled: true
+  inference_interval: 1.0
+  prediction_horizon: 30
+  context_length: 512
+  max_uncertainty: 0.1
+  model_params:
+    prediction_length: 30
+    context_length: 512
+    model_repo: "google/timesfm-2.5-200m-pytorch"
+    backend: "cpu"
+
+long_term:
+  model_name: timesfm
+  device: cpu
+  enabled: false  # DISABLED for Phase 2 testing
+  inference_interval: 30.0
+  prediction_horizon: 60
+  context_length: 512
+  max_uncertainty: 0.15
+  model_params:
+    prediction_length: 60
+    context_length: 512
+    model_repo: "google/timesfm-2.5-200m-pytorch"
+    backend: "cpu"
+
+fusion:
+  enabled: false  # No fusion needed with single model
+  method: none
+  uncertainty_threshold: 0.05
+  fallback_weights:
+    short_term: 1.0
+    long_term: 0.0
+
+preprocessing:
+  outlier_removal:
+    enabled: true
+    method: iqr
+    threshold: 2.0
+  missing_value_handling:
+    enabled: true
+    method: interpolate
+  normalization:
+    enabled: false
+    method: zscore
+
+covariates:
+  enabled: false  # DISABLED for Phase 2
+  variables: []
+  future_variables: []
+
+performance:
+  max_memory_mb: 2048
+  model_timeout: 10.0
+  cache_size: 5
+  batch_size: 1
+
+logging:
+  level: DEBUG
+  log_predictions: true
+  log_uncertainty: true
+  log_fusion_weights: false
+
+clock:
+  frequency_type: second
+  frequency_code: 9
+
+clock_measurement:
+  ntp:
+    servers:
+      - pool.ntp.org
+      - time.nist.gov
+      - time.google.com
+    timeout_seconds: 2.0
+    max_acceptable_uncertainty: 0.100
+    min_stratum: 1
+    max_stratum: 16
+  timing:
+    warm_up:
+      duration_seconds: 60
+      measurement_interval: 5
+    normal_operation:
+      measurement_interval: 180
+
+prediction_scheduling:
+  dataset:
+    prediction_cache_size: 100
+    max_history_size: 1000
+  cpu_model:
+    prediction_interval: 5
+    prediction_horizon: 30
+    prediction_lead_time: 5
+    max_inference_time: 2.0
+  gpu_model:
+    prediction_interval: 30
+    prediction_horizon: 240
+    prediction_lead_time: 10
+    max_inference_time: 5.0
+
+  ntp_correction:
+    enabled: true
+    method: none  # Will be overridden by test script
+    offset_uncertainty: 0.001
+    drift_uncertainty: 0.0001
