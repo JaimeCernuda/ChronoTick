@@ -300,6 +300,14 @@ class DatasetManager:
                 'corrected': False
             }
 
+            # DETAILED DEBUG: Show what we're storing
+            logger.info(f"[DATASET_ADD_NTP] ▶▶▶ STORED NTP measurement:")
+            logger.info(f"  Timestamp: {measurement.timestamp:.2f} ({int(measurement.timestamp)})")
+            logger.info(f"  Offset: {measurement.offset*1000:.3f}ms")
+            logger.info(f"  Uncertainty: {measurement.uncertainty*1000:.3f}ms")
+            logger.info(f"  Source: ntp_measurement")
+            logger.info(f"  Dataset size: {len(self.measurement_dataset)} entries")
+
     def add_prediction(self, timestamp: float, offset: float, drift: float,
                       source: str, uncertainty: float, confidence: float):
         """
@@ -324,8 +332,14 @@ class DatasetManager:
                 'corrected': False
             }
 
-            logger.debug(f"[DATASET_STORE] Stored {source} prediction: t={timestamp:.0f}, "
-                        f"offset={offset*1000:.2f}ms, uncertainty={uncertainty*1000:.2f}ms")
+            # DETAILED DEBUG: Show what prediction we're storing
+            logger.info(f"[DATASET_ADD_PRED] ▶▶▶ STORED {source} prediction:")
+            logger.info(f"  Timestamp: {timestamp:.2f} ({int(timestamp)})")
+            logger.info(f"  Offset: {offset*1000:.3f}ms")
+            logger.info(f"  Drift: {drift*1e6:.3f}μs/s")
+            logger.info(f"  Uncertainty: {uncertainty*1000:.3f}ms")
+            logger.info(f"  Confidence: {confidence:.3f}")
+            logger.info(f"  Dataset size: {len(self.measurement_dataset)} entries")
     
     def fill_measurement_gaps(self, start_time: float, end_time: float,
                              corrections: List[CorrectionWithBounds]):
@@ -376,15 +390,35 @@ class DatasetManager:
             return None
 
         with self.lock:
-            # Find the most recent prediction before NTP
-            prediction_at_ntp = self.get_measurement_at_time(ntp_measurement.timestamp)
+            # Find the most recent ML PREDICTION (not NTP!) before NTP time
+            # CRITICAL FIX: Must compare NTP to ML predictions, not NTP to NTP!
+            prediction_at_ntp = self._get_last_ml_prediction_before(ntp_measurement.timestamp)
             if not prediction_at_ntp:
-                logger.warning(f"[NTP_CORRECTION] No prediction at NTP time {ntp_measurement.timestamp}, just adding NTP")
+                logger.warning(f"[NTP_CORRECTION] No ML predictions before NTP time {ntp_measurement.timestamp:.0f}, "
+                             f"skipping correction (this is normal during early operation)")
                 self.add_ntp_measurement(ntp_measurement)
                 return None
 
-            # Calculate error: error = NTP_truth - Prediction
+            # Calculate error: error = NTP_truth - ML_Prediction
             error = ntp_measurement.offset - prediction_at_ntp['offset']
+
+            # DETAILED DEBUG: Show error calculation
+            logger.info(f"[NTP_CORRECTION_{method.upper()}] ═══════════════════════════════════════════")
+            logger.info(f"[NTP_CORRECTION_{method.upper()}] NEW NTP MEASUREMENT ARRIVED:")
+            logger.info(f"  NTP timestamp: {ntp_measurement.timestamp:.2f}")
+            logger.info(f"  NTP offset (ground truth): {ntp_measurement.offset*1000:.3f}ms")
+            logger.info(f"  NTP uncertainty: {ntp_measurement.uncertainty*1000:.3f}ms")
+            logger.info(f"[NTP_CORRECTION_{method.upper()}] PREDICTION AT NTP TIME:")
+            logger.info(f"  Prediction offset: {prediction_at_ntp['offset']*1000:.3f}ms")
+            logger.info(f"  Prediction source: {prediction_at_ntp['source']}")
+            logger.info(f"[NTP_CORRECTION_{method.upper()}] ERROR CALCULATION:")
+            logger.info(f"  Error = NTP_truth - Prediction")
+            logger.info(f"  Error = {ntp_measurement.offset*1000:.3f}ms - {prediction_at_ntp['offset']*1000:.3f}ms")
+            logger.info(f"  Error = {error*1000:.3f}ms")
+            if abs(error*1000) < 1.0:
+                logger.info(f"  ✓ Error is SMALL (<1ms) - prediction was accurate!")
+            else:
+                logger.info(f"  ✗ Error is LARGE (≥1ms) - prediction missed the mark!")
 
             # Find interval start (last NTP or first prediction)
             interval_start = None
@@ -400,9 +434,12 @@ class DatasetManager:
 
             interval_duration = ntp_measurement.timestamp - interval_start
 
-            logger.info(f"[NTP_CORRECTION_{method.upper()}] Applying correction: "
-                       f"error={error*1000:.2f}ms over {interval_duration:.0f}s "
-                       f"[{interval_start:.0f} → {ntp_measurement.timestamp:.0f}]")
+            logger.info(f"[NTP_CORRECTION_{method.upper()}] CORRECTION INTERVAL:")
+            logger.info(f"  Start: {interval_start:.0f}")
+            logger.info(f"  End: {ntp_measurement.timestamp:.0f}")
+            logger.info(f"  Duration: {interval_duration:.0f}s")
+            logger.info(f"  Method: {method}")
+            logger.info(f"[NTP_CORRECTION_{method.upper()}] ═══════════════════════════════════════════")
 
             # Apply correction based on method
             if method == 'linear':
@@ -796,10 +833,16 @@ class DatasetManager:
                    f"end={end_ntp_offset*1000:.2f}ms @ t={end_time:.0f}")
         logger.info(f"[BACKTRACKING] Interpolating between these values for all predictions in interval")
 
+        # Collect all replacements for detailed logging
+        replacements = []  # List of (timestamp, old_value, new_value, delta)
+
         # REPLACE all predictions with linearly interpolated NTP values
         correction_count = 0
         max_replacement = 0.0
         min_replacement = float('inf')
+        sum_before = 0.0
+        sum_after = 0.0
+        sum_delta = 0.0
 
         for timestamp in range(int(start_time) + 1, int(end_time)):
             if timestamp in self.measurement_dataset:
@@ -815,20 +858,57 @@ class DatasetManager:
                 # Calculate replacement delta for logging
                 replacement_delta = ntp_interpolated - current_offset
 
+                # Store replacement details
+                replacements.append((timestamp, current_offset, ntp_interpolated, replacement_delta))
+
                 # REPLACE prediction with interpolated NTP value
                 self.measurement_dataset[timestamp]['offset'] = ntp_interpolated
                 self.measurement_dataset[timestamp]['corrected'] = True
 
+                # Statistics
                 correction_count += 1
                 max_replacement = max(max_replacement, abs(replacement_delta))
                 if abs(replacement_delta) > 0:
                     min_replacement = min(min_replacement, abs(replacement_delta))
+                sum_before += current_offset
+                sum_after += ntp_interpolated
+                sum_delta += replacement_delta
 
-                # Log sample of replacements (first 3, last 3, and every 30th)
-                if correction_count <= 3 or correction_count % 30 == 0:
-                    logger.debug(f"[BACKTRACKING] t={timestamp}, alpha={alpha:.3f}, "
-                               f"was={current_offset*1000:.2f}ms → now={ntp_interpolated*1000:.2f}ms "
-                               f"(delta={replacement_delta*1000:+.2f}ms)")
+        # Log detailed before/after summary
+        if correction_count > 0:
+            mean_before = sum_before / correction_count
+            mean_after = sum_after / correction_count
+            mean_delta = sum_delta / correction_count
+
+            logger.info(f"[BACKTRACKING] ═══════════════════════════════════════════")
+            logger.info(f"[BACKTRACKING] REPLACEMENT SUMMARY ({correction_count} predictions)")
+            logger.info(f"[BACKTRACKING] ═══════════════════════════════════════════")
+            logger.info(f"[BACKTRACKING] BEFORE correction:")
+            logger.info(f"  Mean offset: {mean_before*1000:.3f}ms")
+            logger.info(f"  Range: {min([r[1] for r in replacements])*1000:.3f}ms to {max([r[1] for r in replacements])*1000:.3f}ms")
+            logger.info(f"[BACKTRACKING] AFTER correction (NTP-interpolated):")
+            logger.info(f"  Mean offset: {mean_after*1000:.3f}ms")
+            logger.info(f"  Range: {min([r[2] for r in replacements])*1000:.3f}ms to {max([r[2] for r in replacements])*1000:.3f}ms")
+            logger.info(f"[BACKTRACKING] DELTA (after - before):")
+            logger.info(f"  Mean delta: {mean_delta*1000:+.3f}ms")
+            logger.info(f"  Min delta: {min([r[3] for r in replacements])*1000:+.3f}ms")
+            logger.info(f"  Max delta: {max([r[3] for r in replacements])*1000:+.3f}ms")
+            logger.info(f"[BACKTRACKING] ═══════════════════════════════════════════")
+
+            # Log first 5 and last 5 replacements
+            logger.info(f"[BACKTRACKING] First 5 replacements:")
+            for i, (ts, old, new, delta) in enumerate(replacements[:5], 1):
+                logger.info(f"  {i}. t={ts}: {old*1000:.3f}ms → {new*1000:.3f}ms (Δ={delta*1000:+.3f}ms)")
+
+            if len(replacements) > 10:
+                logger.info(f"[BACKTRACKING] ... ({len(replacements)-10} more replacements) ...")
+
+            if len(replacements) > 5:
+                logger.info(f"[BACKTRACKING] Last 5 replacements:")
+                for i, (ts, old, new, delta) in enumerate(replacements[-5:], len(replacements)-4):
+                    logger.info(f"  {i}. t={ts}: {old*1000:.3f}ms → {new*1000:.3f}ms (Δ={delta*1000:+.3f}ms)")
+
+            logger.info(f"[BACKTRACKING] ═══════════════════════════════════════════")
 
         logger.info(f"[BACKTRACKING] REPLACED {correction_count} predictions with NTP-interpolated values")
         if correction_count > 0:
@@ -844,18 +924,48 @@ class DatasetManager:
         """
         self.apply_ntp_correction(ntp_measurement, method='linear')
     
+    def _get_last_ml_prediction_before(self, timestamp: float) -> Optional[dict]:
+        """
+        Get the most recent ML PREDICTION (not NTP measurement) before the given timestamp.
+
+        This is critical for NTP correction - we must compare NTP to ML predictions,
+        NOT NTP to NTP! This was the root cause of small corrections.
+
+        Args:
+            timestamp: Target timestamp to find ML prediction before
+
+        Returns:
+            Most recent ML prediction before timestamp, or None if none found
+        """
+        with self.lock:
+            # Find ML predictions only (source starts with 'prediction_')
+            candidates = []
+            for ts, data in self.measurement_dataset.items():
+                if ts <= int(timestamp):  # Must be at or before NTP time
+                    source = data.get('source', '')
+                    # Only ML predictions, not NTP measurements
+                    if source.startswith('prediction_'):
+                        candidates.append((ts, data))
+
+            if not candidates:
+                return None
+
+            # Return the most recent (highest timestamp)
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            return candidates[0][1]
+
     def get_measurement_at_time(self, timestamp: float) -> Optional[dict]:
         """
-        Get the most recent prediction measurement before the given timestamp.
+        Get the most recent measurement (any source) before the given timestamp.
 
-        This is used by apply_ntp_correction() to find the prediction that should
-        be compared against the new NTP ground truth.
+        DEPRECATED: Use _get_last_ml_prediction_before() for NTP correction to avoid
+        comparing NTP to NTP!
 
         Args:
             timestamp: Target timestamp to find measurement before
 
         Returns:
-            Most recent prediction measurement before timestamp, or None if none found
+            Most recent measurement before timestamp, or None if none found
         """
         with self.lock:
             # Find the most recent measurement (any source) before timestamp
@@ -899,6 +1009,24 @@ class DatasetManager:
 
             # Sort by timestamp
             measurements.sort(key=lambda x: x[0])
+
+            # DETAILED DEBUG: Show what we're returning for ML input
+            if measurements:
+                offsets_ms = [m[1]*1000 for m in measurements]
+                logger.info(f"[DATASET_GET_MEASUREMENTS] ◀◀◀ RETURNING data for ML model:")
+                logger.info(f"  Count: {len(measurements)} measurements")
+                logger.info(f"  Time range: {measurements[0][0]:.0f} - {measurements[-1][0]:.0f}")
+                logger.info(f"  Duration: {measurements[-1][0] - measurements[0][0]:.0f}s")
+                logger.info(f"  Offset range: {min(offsets_ms):.3f}ms - {max(offsets_ms):.3f}ms")
+                logger.info(f"  Offset mean: {np.mean(offsets_ms):.3f}ms")
+                logger.info(f"  Offset std: {np.std(offsets_ms):.3f}ms")
+                logger.info(f"  Window filter: {window_seconds}s" if window_seconds else "  Window filter: None (all data)")
+                # Show first 5 and last 5 measurements
+                logger.info(f"  First 5: {[(t, o*1000) for t, o in measurements[:5]]}")
+                logger.info(f"  Last 5: {[(t, o*1000) for t, o in measurements[-5:]]}")
+            else:
+                logger.warning(f"[DATASET_GET_MEASUREMENTS] ◀◀◀ EMPTY dataset! No measurements to return")
+
             return measurements
     
     def calculate_drift_from_measurements(self, measurements: List[Tuple[float, float]]) -> float:
@@ -1039,8 +1167,7 @@ class RealDataPipeline:
 
     def _mark_warm_up_complete(self):
         """Mark warm-up phase as complete and START SCHEDULER"""
-        self.warm_up_complete = True
-        logger.info("Warm-up phase complete - switching to predictive mode")
+        logger.info("Warm-up timer fired - checking if ready to switch to predictive mode")
 
         # CRITICAL: Populate dataset with NTP measurements BEFORE starting scheduler
         logger.info("Populating dataset with collected NTP measurements...")
@@ -1049,14 +1176,47 @@ class RealDataPipeline:
         dataset_size = len(self.dataset_manager.get_recent_measurements())
         logger.info(f"Dataset populated with {dataset_size} NTP measurements")
 
-        if dataset_size < 10:
-            logger.warning(f"Dataset has only {dataset_size} measurements (need >= 10 for ML). "
-                          "Models may fail until more data is collected.")
+        # CRITICAL: Need >= 10 measurements for ML models to work
+        MIN_DATASET_SIZE = 10
+        if dataset_size < MIN_DATASET_SIZE:
+            logger.warning(f"Dataset has only {dataset_size} measurements (need >= {MIN_DATASET_SIZE} for ML).")
+            logger.warning(f"Waiting for more NTP measurements before starting scheduler...")
+            logger.warning(f"STAYING IN WARMUP MODE until sufficient data is collected")
 
-        # NOW start the scheduler with populated dataset
-        logger.info("Starting predictive scheduler with populated dataset...")
+            # Schedule retry in 5 seconds to check again
+            threading.Timer(5.0, self._retry_scheduler_start).start()
+            return  # DON'T start scheduler yet! STAY IN WARMUP MODE
+
+        # Dataset is sufficient - start scheduler now and mark warmup complete
+        self._start_scheduler_with_data()
+
+    def _retry_scheduler_start(self):
+        """Retry starting scheduler after waiting for more NTP data"""
+        logger.info("Checking if enough NTP data has been collected...")
+        self._check_for_ntp_updates(time.time())
+
+        dataset_size = len(self.dataset_manager.get_recent_measurements())
+        logger.info(f"Dataset now has {dataset_size} NTP measurements")
+
+        MIN_DATASET_SIZE = 10
+        if dataset_size < MIN_DATASET_SIZE:
+            logger.warning(f"Still waiting... (have {dataset_size}, need {MIN_DATASET_SIZE})")
+            # Keep retrying every 5 seconds
+            threading.Timer(5.0, self._retry_scheduler_start).start()
+        else:
+            logger.info(f"Sufficient data collected! Starting scheduler...")
+            self._start_scheduler_with_data()
+
+    def _start_scheduler_with_data(self):
+        """Actually start the scheduler once we have sufficient data"""
+        dataset_size = len(self.dataset_manager.get_recent_measurements())
+        logger.info(f"Starting predictive scheduler with {dataset_size} measurements...")
         self.predictive_scheduler.start_scheduler()
         logger.info("Predictive scheduler started - ML predictions now active")
+
+        # CRITICAL: Only NOW mark warmup as complete (scheduler is running)
+        self.warm_up_complete = True
+        logger.info("Warm-up phase complete - switching to predictive mode")
     
     def shutdown(self):
         """Shutdown the pipeline"""
@@ -1314,8 +1474,10 @@ def create_real_data_pipeline(config_path: str) -> RealDataPipeline:
 
 if __name__ == "__main__":
     # Test the real data pipeline
-    config_path = Path(__file__).parent / "configs" / "hybrid_timesfm_chronos.yaml"
-    
+    # Config files are now in project root after reorganization
+    project_root = Path(__file__).parent.parent.parent.parent.parent
+    config_path = project_root / "configs" / "config_enhanced_features.yaml"
+
     pipeline = create_real_data_pipeline(str(config_path))
     
     print("Testing Real Data Pipeline...")
