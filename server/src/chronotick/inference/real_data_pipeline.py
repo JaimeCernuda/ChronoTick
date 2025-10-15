@@ -282,11 +282,16 @@ class DatasetManager:
     Applies retrospective correction when new NTP data arrives.
     """
     
-    def __init__(self):
-        """Initialize dataset manager"""
+    def __init__(self, max_dataset_size=1000):
+        """Initialize dataset manager
+
+        Args:
+            max_dataset_size: Maximum number of measurements to keep in dataset (sliding window)
+        """
         self.measurement_dataset = {}  # timestamp -> {offset, drift, source, uncertainty}
         self.prediction_history = []   # List of (timestamp, prediction) tuples
         self.lock = threading.RLock()  # Use reentrant lock to allow nested lock acquisition
+        self.max_dataset_size = max_dataset_size  # FIX #1: Dataset sliding window
         
     def add_ntp_measurement(self, measurement: NTPMeasurement):
         """Add real NTP measurement to dataset"""
@@ -340,6 +345,19 @@ class DatasetManager:
             logger.info(f"  Uncertainty: {uncertainty*1000:.3f}ms")
             logger.info(f"  Confidence: {confidence:.3f}")
             logger.info(f"  Dataset size: {len(self.measurement_dataset)} entries")
+
+            # FIX #1: Dataset Sliding Window - Prevent unbounded growth
+            if len(self.measurement_dataset) > self.max_dataset_size:
+                # Remove oldest entries (keep most recent max_dataset_size measurements)
+                sorted_timestamps = sorted(self.measurement_dataset.keys())
+                num_to_remove = len(self.measurement_dataset) - self.max_dataset_size
+                timestamps_to_remove = sorted_timestamps[:num_to_remove]
+
+                for ts in timestamps_to_remove:
+                    del self.measurement_dataset[ts]
+
+                logger.info(f"[DATASET_SLIDING_WINDOW] ✂️ Trimmed dataset: removed {num_to_remove} old measurements")
+                logger.info(f"[DATASET_SLIDING_WINDOW] Dataset now: {len(self.measurement_dataset)} entries (max={self.max_dataset_size})")
     
     def fill_measurement_gaps(self, start_time: float, end_time: float,
                              corrections: List[CorrectionWithBounds]):
@@ -1066,13 +1084,35 @@ class RealDataPipeline:
         self.ntp_collector = ClockMeasurementCollector(config_path)
         self.predictive_scheduler = PredictiveScheduler(config_path)
         self.system_metrics = SystemMetricsCollector(collection_interval=1.0)
-        self.dataset_manager = DatasetManager()
-        
-        # Load fusion configuration
+
+        # Load configuration first
         import yaml
         with open(config_path, 'r') as f:
             config = yaml.safe_load(f)
-        
+
+        # FIX #1: Load max_dataset_size from config for sliding window
+        max_dataset_size = config.get('prediction_scheduling', {}).get('dataset', {}).get('max_history_size', 1000)
+        self.dataset_manager = DatasetManager(max_dataset_size=max_dataset_size)
+        logger.info(f"Dataset Manager: max_history_size={max_dataset_size} (sliding window)")
+
+        # FIX #2: Load adaptive capping parameters
+        adaptive_capping_config = config.get('prediction_scheduling', {}).get('adaptive_capping', {})
+        self.max_drift_rate = adaptive_capping_config.get('max_drift_rate', 0.005)  # 5ms/s default
+        self.uncertainty_buffer = adaptive_capping_config.get('uncertainty_buffer', 0.050)  # 50ms default
+        logger.info(f"Adaptive Capping: max_drift_rate={self.max_drift_rate*1000:.1f}ms/s, "
+                   f"uncertainty_buffer={self.uncertainty_buffer*1000:.0f}ms")
+
+        # FIX #3: Load confidence-based capping parameters
+        confidence_capping_config = config.get('prediction_scheduling', {}).get('confidence_capping', {})
+        self.high_confidence_threshold = confidence_capping_config.get('high_confidence_threshold', 0.8)
+        self.medium_confidence_threshold = confidence_capping_config.get('medium_confidence_threshold', 0.5)
+        self.medium_confidence_multiplier = confidence_capping_config.get('medium_confidence_multiplier', 1.5)
+        self.low_confidence_multiplier = confidence_capping_config.get('low_confidence_multiplier', 1.2)
+        logger.info(f"Confidence Capping: high>={self.high_confidence_threshold}, "
+                   f"medium>={self.medium_confidence_threshold}, "
+                   f"medium_mult={self.medium_confidence_multiplier}x, "
+                   f"low_mult={self.low_confidence_multiplier}x")
+
         fusion_config = config.get('prediction_scheduling', {}).get('fusion', {})
         self.fusion_engine = PredictionFusionEngine(fusion_config)
 
@@ -1373,6 +1413,12 @@ class RealDataPipeline:
                 self.stats['prediction_cache_hits'] += 1
             logger.info(f"[CACHE_HIT] Using fused correction from cache")
 
+            # FIX #2: Apply adaptive capping BEFORE storing prediction
+            correction = self._apply_adaptive_capping(correction, current_time)
+
+            # FIX #3: Apply confidence-based capping BEFORE storing prediction
+            correction = self._apply_confidence_based_capping(correction)
+
             # NO real-time NTP blending! Dataset correction handles everything.
             # Just store the prediction and return it.
             self.dataset_manager.add_prediction(
@@ -1395,6 +1441,12 @@ class RealDataPipeline:
             with self.lock:
                 self.stats['prediction_cache_hits'] += 1
             logger.info(f"[CACHE_HIT] Using CPU correction from cache")
+
+            # FIX #2: Apply adaptive capping BEFORE storing prediction
+            cpu_correction = self._apply_adaptive_capping(cpu_correction, current_time)
+
+            # FIX #3: Apply confidence-based capping BEFORE storing prediction
+            cpu_correction = self._apply_confidence_based_capping(cpu_correction)
 
             # NO real-time NTP blending! Dataset correction handles everything.
             # Just store the prediction and return it.
@@ -1448,7 +1500,146 @@ class RealDataPipeline:
         )
         logger.error(error_msg)
         raise RuntimeError(error_msg)
-    
+
+    def _apply_adaptive_capping(self, correction: CorrectionWithBounds, current_time: float) -> CorrectionWithBounds:
+        """
+        FIX #2: Apply adaptive prediction magnitude capping based on last NTP measurement.
+
+        Cap predictions relative to: last_ntp_magnitude + (time_since_ntp * max_drift_rate) + uncertainty_buffer
+        This allows legitimate large corrections when drift accumulates, while preventing runaway predictions.
+
+        Args:
+            correction: The correction to cap
+            current_time: Current timestamp
+
+        Returns:
+            Capped correction (may be same as input if no capping needed)
+        """
+        if self.last_ntp_offset is None or self.last_ntp_time is None:
+            # No NTP reference yet - allow prediction through without capping
+            logger.debug(f"[ADAPTIVE_CAP] No NTP reference yet, skipping capping")
+            return correction
+
+        # Calculate time since last NTP measurement
+        time_since_ntp = current_time - self.last_ntp_time
+
+        # Calculate maximum allowed magnitude based on last NTP + accumulated drift + buffer
+        last_ntp_magnitude = abs(self.last_ntp_offset)
+        max_allowed_magnitude = (last_ntp_magnitude +
+                                 (time_since_ntp * self.max_drift_rate) +
+                                 self.uncertainty_buffer)
+
+        prediction_magnitude = abs(correction.offset_correction)
+
+        # Check if capping is needed
+        if prediction_magnitude > max_allowed_magnitude:
+            # Cap prediction to max allowed magnitude, preserving sign
+            original_prediction = correction.offset_correction
+            capped_prediction = np.sign(correction.offset_correction) * max_allowed_magnitude
+
+            # Reduce confidence for capped predictions (indicates model uncertainty)
+            original_confidence = correction.confidence
+            capped_confidence = correction.confidence * 0.7  # 30% reduction
+
+            logger.warning(f"[ADAPTIVE_CAP] ✂️ CAPPING PREDICTION:")
+            logger.warning(f"  Original prediction: {original_prediction*1000:.1f}ms")
+            logger.warning(f"  Capped to: {capped_prediction*1000:.1f}ms")
+            logger.warning(f"  Last NTP magnitude: {last_ntp_magnitude*1000:.1f}ms")
+            logger.warning(f"  Time since NTP: {time_since_ntp:.0f}s")
+            logger.warning(f"  Max allowed: {max_allowed_magnitude*1000:.1f}ms")
+            logger.warning(f"  Confidence: {original_confidence:.2f} → {capped_confidence:.2f}")
+
+            # Return capped correction
+            return CorrectionWithBounds(
+                offset_correction=capped_prediction,
+                drift_rate=correction.drift_rate,
+                offset_uncertainty=correction.offset_uncertainty,
+                drift_uncertainty=correction.drift_uncertainty,
+                prediction_time=correction.prediction_time,
+                valid_until=correction.valid_until,
+                confidence=capped_confidence,
+                source=correction.source,
+                quantiles=correction.quantiles
+            )
+        else:
+            # No capping needed
+            logger.debug(f"[ADAPTIVE_CAP] ✓ Prediction within bounds: {prediction_magnitude*1000:.1f}ms <= {max_allowed_magnitude*1000:.1f}ms")
+            return correction
+
+    def _apply_confidence_based_capping(self, correction: CorrectionWithBounds) -> CorrectionWithBounds:
+        """
+        FIX #3: Apply confidence-based prediction capping to reduce contamination from uncertain predictions.
+
+        ALWAYS adds to dataset (maintains evenly-spaced data for TimesFM), but caps low-confidence predictions:
+        - High confidence (>=0.8): Use as-is (already went through adaptive cap)
+        - Medium confidence (0.5-0.8): Cap to 1.5x last NTP magnitude
+        - Low confidence (<0.5): Cap to 1.2x last NTP magnitude
+
+        Args:
+            correction: The correction to cap (already adaptive-capped)
+
+        Returns:
+            Capped correction (may be same as input if high confidence or no NTP reference)
+        """
+        if self.last_ntp_offset is None:
+            # No NTP reference yet - allow prediction through
+            logger.debug(f"[CONFIDENCE_CAP] No NTP reference yet, skipping confidence capping")
+            return correction
+
+        confidence = correction.confidence
+
+        # High confidence: Use prediction as-is (already adaptive-capped)
+        if confidence >= self.high_confidence_threshold:
+            logger.debug(f"[CONFIDENCE_CAP] ✓ High confidence ({confidence:.2f}), using as-is")
+            return correction
+
+        # Medium or low confidence: Apply additional capping relative to last NTP
+        last_ntp_magnitude = abs(self.last_ntp_offset)
+        prediction_magnitude = abs(correction.offset_correction)
+
+        # Determine cap multiplier based on confidence level
+        if confidence >= self.medium_confidence_threshold:
+            # Medium confidence
+            cap_multiplier = self.medium_confidence_multiplier
+            confidence_level = "MEDIUM"
+        else:
+            # Low confidence
+            cap_multiplier = self.low_confidence_multiplier
+            confidence_level = "LOW"
+
+        cap = last_ntp_magnitude * cap_multiplier
+
+        # Apply cap if prediction exceeds it
+        if prediction_magnitude > cap:
+            original_prediction = correction.offset_correction
+            capped_prediction = np.sign(correction.offset_correction) * cap
+
+            logger.info(f"[CONFIDENCE_CAP] ✂️ CAPPING {confidence_level} CONFIDENCE PREDICTION:")
+            logger.info(f"  Confidence: {confidence:.2f} ({confidence_level})")
+            logger.info(f"  Original prediction: {original_prediction*1000:.1f}ms")
+            logger.info(f"  Capped to: {capped_prediction*1000:.1f}ms")
+            logger.info(f"  Last NTP magnitude: {last_ntp_magnitude*1000:.1f}ms")
+            logger.info(f"  Cap multiplier: {cap_multiplier}x")
+            logger.info(f"  Cap limit: {cap*1000:.1f}ms")
+
+            # Return capped correction (STILL ADDED TO DATASET!)
+            return CorrectionWithBounds(
+                offset_correction=capped_prediction,
+                drift_rate=correction.drift_rate,
+                offset_uncertainty=correction.offset_uncertainty,
+                drift_uncertainty=correction.drift_uncertainty,
+                prediction_time=correction.prediction_time,
+                valid_until=correction.valid_until,
+                confidence=confidence,  # Keep original confidence
+                source=correction.source,
+                quantiles=correction.quantiles
+            )
+        else:
+            # No additional capping needed
+            logger.debug(f"[CONFIDENCE_CAP] ✓ {confidence_level} confidence ({confidence:.2f}), "
+                        f"within {cap_multiplier}x bound: {prediction_magnitude*1000:.1f}ms <= {cap*1000:.1f}ms")
+            return correction
+
     def get_stats(self) -> dict:
         """Get pipeline statistics"""
         with self.lock:
