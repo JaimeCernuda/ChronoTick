@@ -65,7 +65,7 @@ def main():
     logger.info("")
 
     # Initialize ChronoTick (proper way, like working test scripts)
-    config_path = "configs/config_complete.yaml"
+    config_path = "configs/config_test_drift_aware.yaml"
     logger.info(f"Loading configuration from {config_path}")
 
     # Initialize engine with models
