@@ -34,6 +34,9 @@ env/
 *.swo
 *~
 
+# Documentation drafts
+paper/
+
 # Test results and logs
 results/
 *.log
