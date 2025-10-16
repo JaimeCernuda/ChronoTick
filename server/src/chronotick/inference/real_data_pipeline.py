@@ -15,6 +15,7 @@ import math
 import json
 import functools
 import inspect
+import statistics
 from typing import Optional, Dict, List, Tuple
 from dataclasses import dataclass
 import numpy as np
@@ -314,7 +315,7 @@ class DatasetManager:
             logger.info(f"  Dataset size: {len(self.measurement_dataset)} entries")
 
     def add_prediction(self, timestamp: float, offset: float, drift: float,
-                      source: str, uncertainty: float, confidence: float):
+                      source: str, uncertainty: float, confidence: float, was_capped: bool = False):
         """
         Add ML prediction to dataset for autoregressive training.
 
@@ -325,6 +326,7 @@ class DatasetManager:
             source: Prediction source ('cpu', 'gpu', 'fusion')
             uncertainty: Prediction uncertainty
             confidence: Prediction confidence [0,1]
+            was_capped: Whether this prediction was capped (FIX C: skip backtracking for capped)
         """
         with self.lock:
             self.measurement_dataset[int(timestamp)] = {
@@ -334,7 +336,8 @@ class DatasetManager:
                 'source': f'prediction_{source}',  # Tag as prediction
                 'uncertainty': uncertainty,
                 'confidence': confidence,
-                'corrected': False
+                'corrected': False,
+                'was_capped': was_capped  # FIX C: Track if prediction was capped
             }
 
             # DETAILED DEBUG: Show what prediction we're storing
@@ -854,6 +857,9 @@ class DatasetManager:
         # Collect all replacements for detailed logging
         replacements = []  # List of (timestamp, old_value, new_value, delta)
 
+        # FIX C: Count skipped capped predictions
+        skipped_capped_count = 0
+
         # REPLACE all predictions with linearly interpolated NTP values
         correction_count = 0
         max_replacement = 0.0
@@ -864,6 +870,13 @@ class DatasetManager:
 
         for timestamp in range(int(start_time) + 1, int(end_time)):
             if timestamp in self.measurement_dataset:
+                # FIX C: Skip backtracking for capped predictions (prevents toxic feedback loop)
+                was_capped = self.measurement_dataset[timestamp].get('was_capped', False)
+                if was_capped:
+                    skipped_capped_count += 1
+                    logger.debug(f"[BACKTRACKING] Skipping capped prediction at t={timestamp} (FIX C)")
+                    continue  # Skip this prediction - don't apply backtracking to capped values
+
                 # Calculate interpolation weight
                 alpha = (timestamp - start_time) / interval_duration if interval_duration > 0 else 0
 
@@ -929,6 +942,8 @@ class DatasetManager:
             logger.info(f"[BACKTRACKING] ═══════════════════════════════════════════")
 
         logger.info(f"[BACKTRACKING] REPLACED {correction_count} predictions with NTP-interpolated values")
+        if skipped_capped_count > 0:
+            logger.info(f"[BACKTRACKING] SKIPPED {skipped_capped_count} capped predictions (FIX C: prevents toxic feedback)")
         if correction_count > 0:
             logger.info(f"[BACKTRACKING] Replacement range: {min_replacement*1000:.2f}ms to {max_replacement*1000:.2f}ms")
         logger.info(f"[BACKTRACKING] Dataset now looks like 'what NTP would have measured'")
@@ -1136,6 +1151,10 @@ class RealDataPipeline:
         self.last_processed_ntp_count = 0  # Track how many NTP measurements we've processed
         self.warm_up_complete = False
         self.lock = threading.Lock()
+
+        # FIX A: Track recent NTP measurements for robust adaptive capping
+        self.recent_ntp_measurements = []  # List of (timestamp, offset) tuples
+        self.max_recent_ntp_count = 5  # Keep last 5 NTP measurements
 
         # Statistics
         self.stats = {
@@ -1360,6 +1379,12 @@ class RealDataPipeline:
                     self.last_ntp_offset = offset
                     self.last_ntp_uncertainty = uncertainty
 
+                    # FIX A: Track recent NTP measurements for robust adaptive capping
+                    self.recent_ntp_measurements.append((timestamp, offset))
+                    # Keep only the last N measurements
+                    if len(self.recent_ntp_measurements) > self.max_recent_ntp_count:
+                        self.recent_ntp_measurements = self.recent_ntp_measurements[-self.max_recent_ntp_count:]
+
             # Update count of processed measurements
             self.last_processed_ntp_count = len(all_measurements)
 
@@ -1413,11 +1438,14 @@ class RealDataPipeline:
                 self.stats['prediction_cache_hits'] += 1
             logger.info(f"[CACHE_HIT] Using fused correction from cache")
 
-            # FIX #2: Apply adaptive capping BEFORE storing prediction
-            correction = self._apply_adaptive_capping(correction, current_time)
+            # FIX #2: Apply adaptive capping BEFORE storing prediction (FIX C: returns tuple)
+            correction, adaptive_capped = self._apply_adaptive_capping(correction, current_time)
 
-            # FIX #3: Apply confidence-based capping BEFORE storing prediction
-            correction = self._apply_confidence_based_capping(correction)
+            # FIX #3: Apply confidence-based capping BEFORE storing prediction (FIX C: returns tuple)
+            correction, confidence_capped = self._apply_confidence_based_capping(correction)
+
+            # FIX C: Combine capping flags (True if either capped)
+            was_capped = adaptive_capped or confidence_capped
 
             # NO real-time NTP blending! Dataset correction handles everything.
             # Just store the prediction and return it.
@@ -1427,7 +1455,8 @@ class RealDataPipeline:
                 drift=correction.drift_rate,
                 source=correction.source,
                 uncertainty=correction.offset_uncertainty,
-                confidence=correction.confidence
+                confidence=correction.confidence,
+                was_capped=was_capped  # FIX C: Pass capping flag
             )
 
             return correction
@@ -1442,11 +1471,14 @@ class RealDataPipeline:
                 self.stats['prediction_cache_hits'] += 1
             logger.info(f"[CACHE_HIT] Using CPU correction from cache")
 
-            # FIX #2: Apply adaptive capping BEFORE storing prediction
-            cpu_correction = self._apply_adaptive_capping(cpu_correction, current_time)
+            # FIX #2: Apply adaptive capping BEFORE storing prediction (FIX C: returns tuple)
+            cpu_correction, adaptive_capped = self._apply_adaptive_capping(cpu_correction, current_time)
 
-            # FIX #3: Apply confidence-based capping BEFORE storing prediction
-            cpu_correction = self._apply_confidence_based_capping(cpu_correction)
+            # FIX #3: Apply confidence-based capping BEFORE storing prediction (FIX C: returns tuple)
+            cpu_correction, confidence_capped = self._apply_confidence_based_capping(cpu_correction)
+
+            # FIX C: Combine capping flags (True if either capped)
+            was_capped = adaptive_capped or confidence_capped
 
             # NO real-time NTP blending! Dataset correction handles everything.
             # Just store the prediction and return it.
@@ -1456,7 +1488,8 @@ class RealDataPipeline:
                 drift=cpu_correction.drift_rate,
                 source=cpu_correction.source,
                 uncertainty=cpu_correction.offset_uncertainty,
-                confidence=cpu_correction.confidence
+                confidence=cpu_correction.confidence,
+                was_capped=was_capped  # FIX C: Pass capping flag
             )
 
             return cpu_correction
@@ -1501,7 +1534,7 @@ class RealDataPipeline:
         logger.error(error_msg)
         raise RuntimeError(error_msg)
 
-    def _apply_adaptive_capping(self, correction: CorrectionWithBounds, current_time: float) -> CorrectionWithBounds:
+    def _apply_adaptive_capping(self, correction: CorrectionWithBounds, current_time: float) -> tuple:
         """
         FIX #2: Apply adaptive prediction magnitude capping based on last NTP measurement.
 
@@ -1513,18 +1546,27 @@ class RealDataPipeline:
             current_time: Current timestamp
 
         Returns:
-            Capped correction (may be same as input if no capping needed)
+            Tuple of (capped_correction, was_capped)
         """
         if self.last_ntp_offset is None or self.last_ntp_time is None:
             # No NTP reference yet - allow prediction through without capping
             logger.debug(f"[ADAPTIVE_CAP] No NTP reference yet, skipping capping")
-            return correction
+            return correction, False
 
         # Calculate time since last NTP measurement
         time_since_ntp = current_time - self.last_ntp_time
 
-        # Calculate maximum allowed magnitude based on last NTP + accumulated drift + buffer
-        last_ntp_magnitude = abs(self.last_ntp_offset)
+        # FIX A: Use moving average of recent NTP measurements for robustness
+        if len(self.recent_ntp_measurements) >= 3:
+            # Use moving average of recent NTP magnitudes (robust to noise)
+            recent_magnitudes = [abs(offset) for _, offset in self.recent_ntp_measurements]
+            last_ntp_magnitude = statistics.mean(recent_magnitudes)
+            logger.debug(f"[ADAPTIVE_CAP] Using moving average of {len(recent_magnitudes)} NTP measurements: {last_ntp_magnitude*1000:.1f}ms")
+        else:
+            # Not enough data yet, use single measurement
+            last_ntp_magnitude = abs(self.last_ntp_offset)
+            logger.debug(f"[ADAPTIVE_CAP] Using single NTP measurement (only {len(self.recent_ntp_measurements)} measurements available)")
+
         max_allowed_magnitude = (last_ntp_magnitude +
                                  (time_since_ntp * self.max_drift_rate) +
                                  self.uncertainty_buffer)
@@ -1549,8 +1591,8 @@ class RealDataPipeline:
             logger.warning(f"  Max allowed: {max_allowed_magnitude*1000:.1f}ms")
             logger.warning(f"  Confidence: {original_confidence:.2f} → {capped_confidence:.2f}")
 
-            # Return capped correction
-            return CorrectionWithBounds(
+            # Return capped correction (FIX C: with was_capped=True flag)
+            capped_correction = CorrectionWithBounds(
                 offset_correction=capped_prediction,
                 drift_rate=correction.drift_rate,
                 offset_uncertainty=correction.offset_uncertainty,
@@ -1561,12 +1603,13 @@ class RealDataPipeline:
                 source=correction.source,
                 quantiles=correction.quantiles
             )
+            return capped_correction, True  # FIX C: Signal that capping was applied
         else:
             # No capping needed
             logger.debug(f"[ADAPTIVE_CAP] ✓ Prediction within bounds: {prediction_magnitude*1000:.1f}ms <= {max_allowed_magnitude*1000:.1f}ms")
-            return correction
+            return correction, False  # FIX C: No capping
 
-    def _apply_confidence_based_capping(self, correction: CorrectionWithBounds) -> CorrectionWithBounds:
+    def _apply_confidence_based_capping(self, correction: CorrectionWithBounds) -> tuple:
         """
         FIX #3: Apply confidence-based prediction capping to reduce contamination from uncertain predictions.
 
@@ -1579,19 +1622,19 @@ class RealDataPipeline:
             correction: The correction to cap (already adaptive-capped)
 
         Returns:
-            Capped correction (may be same as input if high confidence or no NTP reference)
+            Tuple of (capped_correction, was_capped)
         """
         if self.last_ntp_offset is None:
             # No NTP reference yet - allow prediction through
             logger.debug(f"[CONFIDENCE_CAP] No NTP reference yet, skipping confidence capping")
-            return correction
+            return correction, False
 
         confidence = correction.confidence
 
         # High confidence: Use prediction as-is (already adaptive-capped)
         if confidence >= self.high_confidence_threshold:
             logger.debug(f"[CONFIDENCE_CAP] ✓ High confidence ({confidence:.2f}), using as-is")
-            return correction
+            return correction, False
 
         # Medium or low confidence: Apply additional capping relative to last NTP
         last_ntp_magnitude = abs(self.last_ntp_offset)
@@ -1622,8 +1665,8 @@ class RealDataPipeline:
             logger.info(f"  Cap multiplier: {cap_multiplier}x")
             logger.info(f"  Cap limit: {cap*1000:.1f}ms")
 
-            # Return capped correction (STILL ADDED TO DATASET!)
-            return CorrectionWithBounds(
+            # Return capped correction (STILL ADDED TO DATASET! FIX C: with was_capped=True)
+            capped_correction = CorrectionWithBounds(
                 offset_correction=capped_prediction,
                 drift_rate=correction.drift_rate,
                 offset_uncertainty=correction.offset_uncertainty,
@@ -1634,11 +1677,12 @@ class RealDataPipeline:
                 source=correction.source,
                 quantiles=correction.quantiles
             )
+            return capped_correction, True  # FIX C: Signal that confidence capping was applied
         else:
             # No additional capping needed
             logger.debug(f"[CONFIDENCE_CAP] ✓ {confidence_level} confidence ({confidence:.2f}), "
                         f"within {cap_multiplier}x bound: {prediction_magnitude*1000:.1f}ms <= {cap*1000:.1f}ms")
-            return correction
+            return correction, False  # FIX C: No capping
 
     def get_stats(self) -> dict:
         """Get pipeline statistics"""

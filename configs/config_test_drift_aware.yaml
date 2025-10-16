@@ -75,10 +75,10 @@ prediction_scheduling:
     method: backtracking
     offset_uncertainty: 0.001
   adaptive_capping:
-    # FIX #2: Adaptive prediction magnitude capping
+    # FIX #2: Adaptive prediction magnitude capping (FIX B: Increased for NTP noise robustness)
     # Cap predictions based on: last_ntp_magnitude + (time_since_ntp * max_drift_rate) + uncertainty_buffer
-    max_drift_rate: 0.005  # 5ms/s - maximum reasonable system clock drift
-    uncertainty_buffer: 0.050  # 50ms - buffer for measurement uncertainty
+    max_drift_rate: 0.020  # 20ms/s - increased from 5ms/s to handle NTP noise (FIX B)
+    uncertainty_buffer: 0.200  # 200ms - increased from 50ms for robustness (FIX B)
   confidence_capping:
     # FIX #3: Confidence-based prediction capping (maintains TimesFM spacing - always adds to dataset)
     high_confidence_threshold: 0.8  # Use prediction as-is above this
