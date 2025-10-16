@@ -1,0 +1,1 @@
+timestamp,elapsed_seconds,client_offset_ms,client_drift_us_per_s,client_source,ntp_ground_truth_offset_ms,ntp_uncertainty_ms,has_ntp,chronotick_error_ms,system_error_ms,dataset_size,corrections_applied

@@ -137,6 +137,23 @@ def main():
                             chronotick_error = (chronotick_time - (current_time + ntp_offset)) * 1000  # ms
                             system_error = -ntp_offset * 1000  # ms
 
+                            # LAYER 5: Early Warning System
+                            abs_error = abs(chronotick_error)
+                            if abs_error > 500:  # 500ms warning threshold
+                                logger.warning(f"⚠️ [LAYER 5] DIVERGENCE WARNING: Error = {chronotick_error:.1f}ms (threshold: 500ms)")
+                                logger.warning(f"   ChronoTick offset: {correction.offset_correction*1000:.1f}ms")
+                                logger.warning(f"   NTP offset: {ntp_offset*1000:.1f}ms")
+                                logger.warning(f"   Source: {correction.source}")
+
+                            if abs_error > 2000:  # 2 second critical threshold
+                                logger.critical(f"🛑 [LAYER 5] CRITICAL DIVERGENCE: Error = {chronotick_error:.1f}ms")
+                                logger.critical(f"   System is unstable - STOPPING TEST to prevent data corruption!")
+                                logger.critical(f"   ChronoTick: {correction.offset_correction*1000:.1f}ms")
+                                logger.critical(f"   NTP: {ntp_offset*1000:.1f}ms")
+                                logger.critical(f"   Samples collected: {sample_count}")
+                                logger.critical(f"   Runtime: {elapsed/3600:.2f} hours")
+                                raise RuntimeError(f"Test stopped due to critical divergence: {abs_error:.1f}ms")
+
                     # Write row
                     row = {
                         'timestamp': current_time,

@@ -1110,23 +1110,28 @@ class RealDataPipeline:
         self.dataset_manager = DatasetManager(max_dataset_size=max_dataset_size)
         logger.info(f"Dataset Manager: max_history_size={max_dataset_size} (sliding window)")
 
-        # FIX #2: Load adaptive capping parameters
+        # LAYER 1: Ultra-Aggressive Capping (simplified formula)
         adaptive_capping_config = config.get('prediction_scheduling', {}).get('adaptive_capping', {})
-        self.max_drift_rate = adaptive_capping_config.get('max_drift_rate', 0.005)  # 5ms/s default
-        self.uncertainty_buffer = adaptive_capping_config.get('uncertainty_buffer', 0.050)  # 50ms default
-        logger.info(f"Adaptive Capping: max_drift_rate={self.max_drift_rate*1000:.1f}ms/s, "
-                   f"uncertainty_buffer={self.uncertainty_buffer*1000:.0f}ms")
+        self.max_multiplier = adaptive_capping_config.get('max_multiplier', 1.5)  # 1.5x NTP default
+        self.absolute_max = adaptive_capping_config.get('absolute_max', 0.300)  # 300ms hard limit
+        self.absolute_min = adaptive_capping_config.get('absolute_min', 0.020)  # 20ms minimum
+        logger.info(f"[LAYER 1] Ultra-Aggressive Capping: max_multiplier={self.max_multiplier}x, "
+                   f"absolute_max={self.absolute_max*1000:.0f}ms, absolute_min={self.absolute_min*1000:.0f}ms")
 
-        # FIX #3: Load confidence-based capping parameters
+        # LAYER 2: Sanity Check Filter
+        sanity_check_config = config.get('prediction_scheduling', {}).get('sanity_check', {})
+        self.sanity_check_enabled = sanity_check_config.get('enabled', True)
+        self.sanity_absolute_limit = sanity_check_config.get('absolute_limit', 1.0)  # 1 second
+        self.sanity_relative_limit = sanity_check_config.get('relative_limit', 5.0)  # 5x NTP
+        self.sanity_statistical_limit = sanity_check_config.get('statistical_limit', 3.0)  # 3 sigma
+        logger.info(f"[LAYER 2] Sanity Check: enabled={self.sanity_check_enabled}, "
+                   f"absolute={self.sanity_absolute_limit*1000:.0f}ms, "
+                   f"relative={self.sanity_relative_limit}x, statistical={self.sanity_statistical_limit}σ")
+
+        # LAYER 3: Confidence-based capping (DISABLED)
         confidence_capping_config = config.get('prediction_scheduling', {}).get('confidence_capping', {})
-        self.high_confidence_threshold = confidence_capping_config.get('high_confidence_threshold', 0.8)
-        self.medium_confidence_threshold = confidence_capping_config.get('medium_confidence_threshold', 0.5)
-        self.medium_confidence_multiplier = confidence_capping_config.get('medium_confidence_multiplier', 1.5)
-        self.low_confidence_multiplier = confidence_capping_config.get('low_confidence_multiplier', 1.2)
-        logger.info(f"Confidence Capping: high>={self.high_confidence_threshold}, "
-                   f"medium>={self.medium_confidence_threshold}, "
-                   f"medium_mult={self.medium_confidence_multiplier}x, "
-                   f"low_mult={self.low_confidence_multiplier}x")
+        self.confidence_capping_enabled = confidence_capping_config.get('enabled', False)
+        logger.info(f"[LAYER 3] Confidence Capping: DISABLED (simplified to single capping method)")
 
         fusion_config = config.get('prediction_scheduling', {}).get('fusion', {})
         self.fusion_engine = PredictionFusionEngine(fusion_config)
@@ -1438,14 +1443,14 @@ class RealDataPipeline:
                 self.stats['prediction_cache_hits'] += 1
             logger.info(f"[CACHE_HIT] Using fused correction from cache")
 
-            # FIX #2: Apply adaptive capping BEFORE storing prediction (FIX C: returns tuple)
-            correction, adaptive_capped = self._apply_adaptive_capping(correction, current_time)
+            # LAYER 1 & 2: Apply ultra-aggressive capping + sanity check
+            correction, adaptive_capped, sanity_passed = self._apply_adaptive_capping(correction, current_time)
 
-            # FIX #3: Apply confidence-based capping BEFORE storing prediction (FIX C: returns tuple)
-            correction, confidence_capped = self._apply_confidence_based_capping(correction)
+            # LAYER 3: Confidence capping DISABLED (skip)
+            confidence_capped = False
 
-            # FIX C: Combine capping flags (True if either capped)
-            was_capped = adaptive_capped or confidence_capped
+            # Combine capping flags: adaptive_capped OR sanity_failed
+            was_capped = adaptive_capped or (not sanity_passed)
 
             # NO real-time NTP blending! Dataset correction handles everything.
             # Just store the prediction and return it.
@@ -1536,62 +1541,62 @@ class RealDataPipeline:
 
     def _apply_adaptive_capping(self, correction: CorrectionWithBounds, current_time: float) -> tuple:
         """
-        FIX #2: Apply adaptive prediction magnitude capping based on last NTP measurement.
+        LAYER 1: Ultra-Aggressive Capping (simplified formula).
 
-        Cap predictions relative to: last_ntp_magnitude + (time_since_ntp * max_drift_rate) + uncertainty_buffer
-        This allows legitimate large corrections when drift accumulates, while preventing runaway predictions.
-
-        Args:
-            correction: The correction to cap
-            current_time: Current timestamp
+        New formula: Cap = min(max(NTP_magnitude * multiplier, min_cap), max_cap)
+        - No drift term (that caused 2.3s disaster)
+        - Hard limits prevent catastrophic predictions
+        - Much tighter bounds than before
 
         Returns:
-            Tuple of (capped_correction, was_capped)
+            Tuple of (capped_correction, was_capped, sanity_passed)
         """
-        if self.last_ntp_offset is None or self.last_ntp_time is None:
-            # No NTP reference yet - allow prediction through without capping
-            logger.debug(f"[ADAPTIVE_CAP] No NTP reference yet, skipping capping")
-            return correction, False
+        if self.last_ntp_offset is None:
+            logger.debug(f"[LAYER 1] No NTP reference yet, skipping capping")
+            return correction, False, True
 
-        # Calculate time since last NTP measurement
-        time_since_ntp = current_time - self.last_ntp_time
-
-        # FIX A: Use moving average of recent NTP measurements for robustness
-        if len(self.recent_ntp_measurements) >= 3:
-            # Use moving average of recent NTP magnitudes (robust to noise)
-            recent_magnitudes = [abs(offset) for _, offset in self.recent_ntp_measurements]
-            last_ntp_magnitude = statistics.mean(recent_magnitudes)
-            logger.debug(f"[ADAPTIVE_CAP] Using moving average of {len(recent_magnitudes)} NTP measurements: {last_ntp_magnitude*1000:.1f}ms")
-        else:
-            # Not enough data yet, use single measurement
-            last_ntp_magnitude = abs(self.last_ntp_offset)
-            logger.debug(f"[ADAPTIVE_CAP] Using single NTP measurement (only {len(self.recent_ntp_measurements)} measurements available)")
-
-        max_allowed_magnitude = (last_ntp_magnitude +
-                                 (time_since_ntp * self.max_drift_rate) +
-                                 self.uncertainty_buffer)
+        # Calculate cap using simplified formula
+        last_ntp_magnitude = abs(self.last_ntp_offset)
+        cap = last_ntp_magnitude * self.max_multiplier
+        cap = max(cap, self.absolute_min)  # At least min_cap
+        cap = min(cap, self.absolute_max)  # At most max_cap
 
         prediction_magnitude = abs(correction.offset_correction)
 
-        # Check if capping is needed
-        if prediction_magnitude > max_allowed_magnitude:
-            # Cap prediction to max allowed magnitude, preserving sign
+        # LAYER 2: Sanity check BEFORE capping
+        sanity_passed, sanity_reason = self._sanity_check_prediction(correction, current_time)
+
+        if not sanity_passed:
+            # Prediction failed sanity check - use last NTP as fallback
+            logger.error(f"[LAYER 2] ❌ SANITY CHECK FAILED: {sanity_reason}")
+            logger.error(f"[LAYER 2] Replacing insane prediction ({correction.offset_correction*1000:.1f}ms) with last NTP ({self.last_ntp_offset*1000:.1f}ms)")
+
+            # Replace with last NTP (safe fallback)
+            safe_correction = CorrectionWithBounds(
+                offset_correction=self.last_ntp_offset,
+                drift_rate=0.0,
+                offset_uncertainty=self.last_ntp_uncertainty if self.last_ntp_uncertainty else 0.010,
+                drift_uncertainty=0.0001,
+                prediction_time=correction.prediction_time,
+                valid_until=correction.valid_until,
+                confidence=0.5,  # Low confidence for fallback
+                source="sanity_fallback_ntp",
+                quantiles=None
+            )
+            return safe_correction, True, False  # Capped, sanity failed
+
+        # Sanity passed - check if prediction exceeds cap
+        if prediction_magnitude > cap:
             original_prediction = correction.offset_correction
-            capped_prediction = np.sign(correction.offset_correction) * max_allowed_magnitude
+            capped_prediction = np.sign(correction.offset_correction) * cap
+            capped_confidence = correction.confidence * 0.7
 
-            # Reduce confidence for capped predictions (indicates model uncertainty)
-            original_confidence = correction.confidence
-            capped_confidence = correction.confidence * 0.7  # 30% reduction
-
-            logger.warning(f"[ADAPTIVE_CAP] ✂️ CAPPING PREDICTION:")
-            logger.warning(f"  Original prediction: {original_prediction*1000:.1f}ms")
+            logger.warning(f"[LAYER 1] ✂️ CAPPING PREDICTION:")
+            logger.warning(f"  Original: {original_prediction*1000:.1f}ms")
+            logger.warning(f"  Cap: {cap*1000:.1f}ms (NTP={last_ntp_magnitude*1000:.1f}ms × {self.max_multiplier})")
             logger.warning(f"  Capped to: {capped_prediction*1000:.1f}ms")
-            logger.warning(f"  Last NTP magnitude: {last_ntp_magnitude*1000:.1f}ms")
-            logger.warning(f"  Time since NTP: {time_since_ntp:.0f}s")
-            logger.warning(f"  Max allowed: {max_allowed_magnitude*1000:.1f}ms")
-            logger.warning(f"  Confidence: {original_confidence:.2f} → {capped_confidence:.2f}")
+            logger.warning(f"  Confidence: {correction.confidence:.2f} → {capped_confidence:.2f}")
 
-            # Return capped correction (FIX C: with was_capped=True flag)
             capped_correction = CorrectionWithBounds(
                 offset_correction=capped_prediction,
                 drift_rate=correction.drift_rate,
@@ -1603,11 +1608,52 @@ class RealDataPipeline:
                 source=correction.source,
                 quantiles=correction.quantiles
             )
-            return capped_correction, True  # FIX C: Signal that capping was applied
+            return capped_correction, True, True  # Capped, sanity passed
         else:
-            # No capping needed
-            logger.debug(f"[ADAPTIVE_CAP] ✓ Prediction within bounds: {prediction_magnitude*1000:.1f}ms <= {max_allowed_magnitude*1000:.1f}ms")
-            return correction, False  # FIX C: No capping
+            logger.debug(f"[LAYER 1] ✓ Prediction OK: {prediction_magnitude*1000:.1f}ms <= {cap*1000:.1f}ms")
+            return correction, False, True  # Not capped, sanity passed
+
+    def _sanity_check_prediction(self, correction: CorrectionWithBounds, current_time: float) -> tuple:
+        """
+        LAYER 2: Sanity check filter to catch catastrophic predictions.
+
+        Checks:
+        1. Absolute limit: prediction < 1 second
+        2. Relative limit: prediction < 5x average NTP
+        3. Statistical limit: prediction < 3σ from NTP mean
+
+        Returns:
+            (passed, reason) tuple
+        """
+        if not self.sanity_check_enabled:
+            return True, "Sanity check disabled"
+
+        if self.last_ntp_offset is None:
+            return True, "No NTP reference yet"
+
+        pred_magnitude = abs(correction.offset_correction)
+
+        # Check 1: Absolute limit
+        if pred_magnitude > self.sanity_absolute_limit:
+            return False, f"Exceeds {self.sanity_absolute_limit*1000:.0f}ms limit ({pred_magnitude*1000:.0f}ms)"
+
+        # Check 2: Relative to NTP (5x threshold)
+        if len(self.recent_ntp_measurements) >= 2:
+            recent_magnitudes = [abs(offset) for _, offset in self.recent_ntp_measurements]
+            ntp_avg = statistics.mean(recent_magnitudes)
+
+            if pred_magnitude > self.sanity_relative_limit * ntp_avg:
+                return False, f"{self.sanity_relative_limit}x larger than NTP avg ({pred_magnitude/ntp_avg:.1f}x)"
+
+            # Check 3: Statistical outlier (3 sigma)
+            if len(recent_magnitudes) >= 3:
+                ntp_std = statistics.stdev(recent_magnitudes)
+                z_score = (pred_magnitude - ntp_avg) / ntp_std if ntp_std > 0 else 0
+
+                if abs(z_score) > self.sanity_statistical_limit:
+                    return False, f"{abs(z_score):.1f}σ outlier (threshold={self.sanity_statistical_limit}σ)"
+
+        return True, "All checks passed"
 
     def _apply_confidence_based_capping(self, correction: CorrectionWithBounds) -> tuple:
         """

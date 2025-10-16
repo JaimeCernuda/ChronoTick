@@ -75,16 +75,26 @@ prediction_scheduling:
     method: backtracking
     offset_uncertainty: 0.001
   adaptive_capping:
-    # FIX #2: Adaptive prediction magnitude capping (FIX B: Increased for NTP noise robustness)
-    # Cap predictions based on: last_ntp_magnitude + (time_since_ntp * max_drift_rate) + uncertainty_buffer
-    max_drift_rate: 0.020  # 20ms/s - increased from 5ms/s to handle NTP noise (FIX B)
-    uncertainty_buffer: 0.200  # 200ms - increased from 50ms for robustness (FIX B)
+    # LAYER 1: Ultra-Aggressive Capping (based on failure analysis)
+    # Failure: Previous config allowed 2.3s predictions → catastrophic divergence
+    # Fix: Cap at 1.5x last NTP with hard 300ms max
+    max_multiplier: 1.5        # Cap to 1.5x last NTP magnitude (replaces drift calculation)
+    absolute_max: 0.300        # Hard maximum: 300ms (prevent all catastrophic predictions)
+    absolute_min: 0.020        # Minimum cap: 20ms (reasonable lower bound)
+  sanity_check:
+    # LAYER 2: Sanity Check Filter (catch anything that slips through capping)
+    enabled: true
+    absolute_limit: 1.0        # Reject any prediction > 1 second
+    relative_limit: 5.0        # Reject if > 5x average NTP magnitude
+    statistical_limit: 3.0     # Reject if > 3 sigma from NTP mean
   confidence_capping:
-    # FIX #3: Confidence-based prediction capping (maintains TimesFM spacing - always adds to dataset)
-    high_confidence_threshold: 0.8  # Use prediction as-is above this
-    medium_confidence_threshold: 0.5  # Medium confidence range
-    medium_confidence_multiplier: 1.5  # Cap medium confidence to 1.5x last NTP magnitude
-    low_confidence_multiplier: 1.2  # Cap low confidence to 1.2x last NTP magnitude
+    # LAYER 3: DISABLED (caused confusion with dual-capping system)
+    # Keeping config structure for compatibility but not used
+    enabled: false
+    high_confidence_threshold: 0.8
+    medium_confidence_threshold: 0.5
+    medium_confidence_multiplier: 1.5
+    low_confidence_multiplier: 1.2
 preprocessing:
   missing_value_handling:
     enabled: true
