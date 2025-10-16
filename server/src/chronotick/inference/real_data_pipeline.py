@@ -1585,8 +1585,32 @@ class RealDataPipeline:
             )
             return safe_correction, True, False  # Capped, sanity failed
 
-        # Sanity passed - check if prediction exceeds cap
-        if prediction_magnitude > cap:
+        # Sanity passed - check if prediction is below minimum (FIX: enforce absolute_min)
+        if prediction_magnitude < self.absolute_min:
+            original_prediction = correction.offset_correction
+            boosted_prediction = np.sign(correction.offset_correction) * self.absolute_min
+            boosted_confidence = correction.confidence * 0.9  # Slight confidence reduction for boosting
+
+            logger.warning(f"[LAYER 1] ⬆️ BOOSTING PREDICTION TO MINIMUM:")
+            logger.warning(f"  Original: {original_prediction*1000:.1f}ms")
+            logger.warning(f"  Minimum: {self.absolute_min*1000:.1f}ms")
+            logger.warning(f"  Boosted to: {boosted_prediction*1000:.1f}ms")
+            logger.warning(f"  Confidence: {correction.confidence:.2f} → {boosted_confidence:.2f}")
+
+            boosted_correction = CorrectionWithBounds(
+                offset_correction=boosted_prediction,
+                drift_rate=correction.drift_rate,
+                offset_uncertainty=correction.offset_uncertainty,
+                drift_uncertainty=correction.drift_uncertainty,
+                prediction_time=correction.prediction_time,
+                valid_until=correction.valid_until,
+                confidence=boosted_confidence,
+                source=correction.source,
+                quantiles=correction.quantiles
+            )
+            return boosted_correction, True, True  # Boosted (counted as capped), sanity passed
+        # Check if prediction exceeds cap maximum
+        elif prediction_magnitude > cap:
             original_prediction = correction.offset_correction
             capped_prediction = np.sign(correction.offset_correction) * cap
             capped_confidence = correction.confidence * 0.7
@@ -1610,7 +1634,7 @@ class RealDataPipeline:
             )
             return capped_correction, True, True  # Capped, sanity passed
         else:
-            logger.debug(f"[LAYER 1] ✓ Prediction OK: {prediction_magnitude*1000:.1f}ms <= {cap*1000:.1f}ms")
+            logger.debug(f"[LAYER 1] ✓ Prediction OK: {self.absolute_min*1000:.1f}ms <= {prediction_magnitude*1000:.1f}ms <= {cap*1000:.1f}ms")
             return correction, False, True  # Not capped, sanity passed
 
     def _sanity_check_prediction(self, correction: CorrectionWithBounds, current_time: float) -> tuple:

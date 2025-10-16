@@ -77,10 +77,10 @@ prediction_scheduling:
   adaptive_capping:
     # LAYER 1: Ultra-Aggressive Capping (based on failure analysis)
     # Failure: Previous config allowed 2.3s predictions → catastrophic divergence
-    # Fix: Cap at 1.5x last NTP with hard 300ms max
-    max_multiplier: 1.5        # Cap to 1.5x last NTP magnitude (replaces drift calculation)
+    # Fix: Cap at 2.5x last NTP with hard 300ms max
+    max_multiplier: 2.5        # Cap to 2.5x last NTP magnitude (replaces drift calculation)
     absolute_max: 0.300        # Hard maximum: 300ms (prevent all catastrophic predictions)
-    absolute_min: 0.020        # Minimum cap: 20ms (reasonable lower bound)
+    absolute_min: 0.005        # Minimum cap: 5ms (lower bound to allow learning)
   sanity_check:
     # LAYER 2: Sanity Check Filter (catch anything that slips through capping)
     enabled: true
