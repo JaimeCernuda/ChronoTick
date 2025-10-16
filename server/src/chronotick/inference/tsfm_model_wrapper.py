@@ -252,7 +252,7 @@ class TSFMModelWrapper:
                 drift=drift,
                 offset_uncertainty=offset_uncertainty,
                 drift_uncertainty=drift_uncertainty,
-                confidence=0.95,  # Default confidence
+                confidence=prediction_result.confidence,  # Use confidence from engine (based on uncertainty)
                 timestamp=prediction_result.timestamp + i,
                 quantiles=quantiles_dict
             ))
