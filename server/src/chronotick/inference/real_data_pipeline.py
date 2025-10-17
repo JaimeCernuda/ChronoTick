@@ -826,7 +826,8 @@ class DatasetManager:
         # FIX: Expand correction window to cover full context
         # OLD: Only correct between last NTP and current NTP (180s)
         # NEW: Correct full context window before current NTP (512s)
-        correction_start = max(start_time, end_time - context_window_size)
+        # CRITICAL: Don't limit by start_time - always go back full 512s!
+        correction_start = end_time - context_window_size
         correction_end = end_time
         correction_duration = correction_end - correction_start
 
