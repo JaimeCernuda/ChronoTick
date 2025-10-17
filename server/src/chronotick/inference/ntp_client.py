@@ -17,6 +17,7 @@ import statistics
 import numpy as np
 import yaml
 from pathlib import Path
+from collections import deque
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,87 @@ class NTPConfig:
     min_stratum: int = 3
     max_delay: float = 0.100  # 100ms max acceptable delay
     measurement_mode: str = "simple"  # "simple" or "advanced" (2-3 queries with averaging)
+    # Outlier rejection
+    outlier_window_size: int = 20  # Rolling window for outlier detection
+    outlier_sigma_threshold: float = 3.0  # Z-score threshold for outlier rejection
+
+
+class NTPOutlierFilter:
+    """
+    Statistical outlier filter for NTP measurements.
+
+    Rejects measurements that deviate significantly from recent baseline
+    using z-score (standard deviations from mean).
+
+    This prevents wild clock jumps (e.g., 849ms → 70ms) from corrupting
+    the normalization baseline.
+    """
+
+    def __init__(self, window_size: int = 20, sigma_threshold: float = 3.0):
+        """
+        Initialize outlier filter.
+
+        Args:
+            window_size: Number of recent measurements to track
+            sigma_threshold: Z-score threshold (3.0 = 99.7% confidence)
+        """
+        self.measurements = deque(maxlen=window_size)
+        self.sigma_threshold = sigma_threshold
+        self.rejected_count = 0
+        self.accepted_count = 0
+
+    def is_outlier(self, offset_ms: float) -> Tuple[bool, str]:
+        """
+        Check if measurement is an outlier.
+
+        Returns: (is_outlier, reason_string)
+        """
+        # Need minimum samples for statistics
+        MIN_SAMPLES = 5
+        if len(self.measurements) < MIN_SAMPLES:
+            return False, f"insufficient_history ({len(self.measurements)}/{MIN_SAMPLES})"
+
+        # Calculate statistics from recent history
+        mean = np.mean(self.measurements)
+        std = np.std(self.measurements)
+
+        # Avoid division by zero for very stable clocks
+        if std < 0.001:  # Less than 1μs variation
+            std = 0.001
+
+        # Calculate z-score
+        z_score = abs(offset_ms - mean) / std
+
+        is_outlier = z_score > self.sigma_threshold
+
+        if is_outlier:
+            reason = f"z={z_score:.2f} (>{self.sigma_threshold}σ), mean={mean:.2f}ms, std={std:.2f}ms"
+            return True, reason
+        else:
+            return False, f"z={z_score:.2f} (ok)"
+
+    def add_measurement(self, offset_ms: float):
+        """Add accepted measurement to history"""
+        self.measurements.append(offset_ms)
+        self.accepted_count += 1
+
+    def record_rejection(self):
+        """Record that a measurement was rejected"""
+        self.rejected_count += 1
+
+    def get_stats(self) -> dict:
+        """Get filter statistics"""
+        total = self.accepted_count + self.rejected_count
+        rejection_rate = self.rejected_count / total if total > 0 else 0
+
+        return {
+            "accepted": self.accepted_count,
+            "rejected": self.rejected_count,
+            "rejection_rate": rejection_rate,
+            "window_size": len(self.measurements),
+            "current_mean": np.mean(self.measurements) if self.measurements else None,
+            "current_std": np.std(self.measurements) if self.measurements else None
+        }
 
 
 class NTPClient:
@@ -56,10 +138,18 @@ class NTPClient:
         self.config = config
         self.measurement_history = []
         self.lock = threading.Lock()
-        
+
         # NTP packet format constants
         self.NTP_PACKET_FORMAT = "!12I"
         self.NTP_EPOCH_OFFSET = 2208988800  # Seconds between 1900 and 1970
+
+        # Outlier filter for rejecting bad measurements
+        self.outlier_filter = NTPOutlierFilter(
+            window_size=config.outlier_window_size,
+            sigma_threshold=config.outlier_sigma_threshold
+        )
+        logger.info(f"[OUTLIER_FILTER] Initialized with window={config.outlier_window_size}, "
+                   f"threshold={config.outlier_sigma_threshold}σ")
         
     def measure_offset(self, server: str) -> Optional[NTPMeasurement]:
         """
@@ -317,11 +407,32 @@ class NTPClient:
                              key=lambda m: (m.delay, -m.stratum, m.uncertainty))
 
         mode_str = "advanced" if self.config.measurement_mode == "advanced" else "simple"
+
+        # Check if measurement is an outlier
+        offset_ms = best_measurement.offset * 1000.0  # Convert to milliseconds
+        is_outlier, reason = self.outlier_filter.is_outlier(offset_ms)
+
+        if is_outlier:
+            self.outlier_filter.record_rejection()
+            logger.warning(f"[OUTLIER_FILTER] ✂️ REJECTED NTP measurement from {best_measurement.server}: "
+                          f"offset={offset_ms:.2f}ms - {reason}")
+
+            # Log filter statistics periodically
+            stats = self.outlier_filter.get_stats()
+            if stats['rejected'] % 5 == 0 and stats['rejected'] > 0:
+                logger.info(f"[OUTLIER_FILTER] Stats: {stats['accepted']} accepted, "
+                           f"{stats['rejected']} rejected ({stats['rejection_rate']*100:.1f}% rejection rate)")
+
+            return None  # Reject this measurement
+
+        # Accept measurement
+        self.outlier_filter.add_measurement(offset_ms)
+
         logger.info(f"Selected NTP measurement ({mode_str} mode) from {best_measurement.server}: "
                    f"offset={best_measurement.offset*1e6:.1f}μs, "
                    f"delay={best_measurement.delay*1000:.1f}ms, "
                    f"uncertainty={best_measurement.uncertainty*1e6:.1f}μs, "
-                   f"stratum={best_measurement.stratum}")
+                   f"stratum={best_measurement.stratum} - {reason}")
 
         # Store in history
         with self.lock:

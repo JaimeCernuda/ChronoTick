@@ -1102,15 +1102,20 @@ class DatasetManager:
         """
         Calculate the recent NTP baseline for offset normalization.
 
-        Uses the mean of the most recent N NTP measurements to establish
-        the absolute clock offset baseline. This baseline is then subtracted
-        from all measurements to create zero-centered training data.
+        Phase 2 Enhancement: Uses exponential smoothing to prevent sudden baseline jumps.
+
+        If smoothing is enabled (default):
+            - Applies EMA: smoothed = α * new + (1-α) * previous
+            - Prevents wild oscillations (e.g., 849ms → 70ms jumps)
+            - Trades slight lag for stability
+
+        Otherwise falls back to simple mean of recent N measurements.
 
         Args:
-            lookback_count: Number of recent NTP measurements to average
+            lookback_count: Number of recent NTP measurements to average (fallback mode)
 
         Returns:
-            Mean NTP offset, or None if insufficient data
+            Smoothed NTP baseline, or None if insufficient data
         """
         with self.lock:
             # Find recent NTP measurements
@@ -1125,8 +1130,39 @@ class DatasetManager:
             if len(ntp_measurements) < 2:
                 return None
 
-            baseline = float(np.mean(ntp_measurements))
-            logger.debug(f"[NORMALIZATION] NTP baseline from {len(ntp_measurements)} recent measurements: {baseline*1000:.3f}ms")
+            # Calculate raw baseline from recent measurements
+            raw_baseline = float(np.mean(ntp_measurements))
+
+            # Apply exponential smoothing if enabled
+            if self.baseline_smoothing_enabled:
+                if self.smoothed_baseline is None:
+                    # Initialize on first measurement
+                    self.smoothed_baseline = raw_baseline
+                    logger.info(f"[BASELINE_SMOOTHING] ✓ Initialized baseline: {raw_baseline*1000:.3f}ms")
+                else:
+                    # EMA: new = α * current + (1-α) * previous
+                    previous_smoothed = self.smoothed_baseline
+                    self.smoothed_baseline = (
+                        self.baseline_smoothing_alpha * raw_baseline +
+                        (1 - self.baseline_smoothing_alpha) * self.smoothed_baseline
+                    )
+
+                    # Log significant changes (>10ms delta)
+                    delta = abs(self.smoothed_baseline - previous_smoothed) * 1000  # ms
+                    if delta > 10.0:
+                        logger.info(f"[BASELINE_SMOOTHING] Raw: {raw_baseline*1000:.3f}ms, "
+                                   f"Smoothed: {self.smoothed_baseline*1000:.3f}ms "
+                                   f"(Δ{delta:.1f}ms from prev)")
+                    else:
+                        logger.debug(f"[BASELINE_SMOOTHING] Raw: {raw_baseline*1000:.3f}ms, "
+                                    f"Smoothed: {self.smoothed_baseline*1000:.3f}ms")
+
+                baseline = self.smoothed_baseline
+            else:
+                # Fallback: simple mean
+                baseline = raw_baseline
+                logger.debug(f"[NORMALIZATION] NTP baseline from {len(ntp_measurements)} recent measurements: {baseline*1000:.3f}ms")
+
             return baseline
 
     def get_recent_measurements(self, window_seconds: int = None, normalize: bool = True) -> Tuple[List[Tuple[float, float]], Optional[float]]:
@@ -1241,6 +1277,14 @@ class RealDataPipeline:
         max_dataset_size = config.get('prediction_scheduling', {}).get('dataset', {}).get('max_history_size', 1000)
         self.dataset_manager = DatasetManager(max_dataset_size=max_dataset_size)
         logger.info(f"Dataset Manager: max_history_size={max_dataset_size} (sliding window)")
+
+        # Baseline Smoothing (Phase 2) - Exponential Moving Average
+        baseline_smoothing_config = config.get('prediction_scheduling', {}).get('baseline_smoothing', {})
+        self.baseline_smoothing_enabled = baseline_smoothing_config.get('enabled', True)
+        self.baseline_smoothing_alpha = baseline_smoothing_config.get('alpha', 0.3)  # 0.3 = moderate smoothing
+        self.smoothed_baseline = None  # Will be initialized on first NTP measurement
+        logger.info(f"[BASELINE_SMOOTHING] Enabled: {self.baseline_smoothing_enabled}, "
+                   f"alpha={self.baseline_smoothing_alpha} ({'moderate' if self.baseline_smoothing_alpha == 0.3 else 'light' if self.baseline_smoothing_alpha > 0.3 else 'heavy'} smoothing)")
 
         # LAYER 1: Ultra-Aggressive Capping (simplified formula)
         adaptive_capping_config = config.get('prediction_scheduling', {}).get('adaptive_capping', {})
