@@ -111,9 +111,21 @@ class NTPOutlierFilter:
         self.rejected_count += 1
 
     def get_stats(self) -> dict:
-        """Get filter statistics"""
+        """Get filter statistics with enhanced metrics for test analysis"""
         total = self.accepted_count + self.rejected_count
         rejection_rate = self.rejected_count / total if total > 0 else 0
+
+        # Calculate baseline stability metrics
+        baseline_stability = None
+        if len(self.measurements) >= 5:
+            # Measure how much the baseline is jumping around
+            baseline_stability = {
+                "mean_ms": float(np.mean(self.measurements)),
+                "std_ms": float(np.std(self.measurements)),
+                "range_ms": float(np.max(self.measurements) - np.min(self.measurements)),
+                "median_ms": float(np.median(self.measurements)),
+                "iqr_ms": float(np.percentile(self.measurements, 75) - np.percentile(self.measurements, 25))
+            }
 
         return {
             "accepted": self.accepted_count,
@@ -121,7 +133,8 @@ class NTPOutlierFilter:
             "rejection_rate": rejection_rate,
             "window_size": len(self.measurements),
             "current_mean": np.mean(self.measurements) if self.measurements else None,
-            "current_std": np.std(self.measurements) if self.measurements else None
+            "current_std": np.std(self.measurements) if self.measurements else None,
+            "baseline_stability": baseline_stability
         }
 
 
@@ -428,11 +441,22 @@ class NTPClient:
         # Accept measurement
         self.outlier_filter.add_measurement(offset_ms)
 
-        logger.info(f"Selected NTP measurement ({mode_str} mode) from {best_measurement.server}: "
+        logger.info(f"[NTP_ACCEPTED] Selected from {best_measurement.server} ({mode_str}): "
                    f"offset={best_measurement.offset*1e6:.1f}μs, "
                    f"delay={best_measurement.delay*1000:.1f}ms, "
                    f"uncertainty={best_measurement.uncertainty*1e6:.1f}μs, "
-                   f"stratum={best_measurement.stratum} - {reason}")
+                   f"stratum={best_measurement.stratum}, z-score={reason}")
+
+        # Log periodic statistics summary for test analysis (every 10 measurements)
+        stats = self.outlier_filter.get_stats()
+        if stats['accepted'] % 10 == 0 and stats['accepted'] > 0:
+            logger.info(f"[PHASE1_STATS] Outlier Filter Summary after {stats['accepted']} measurements:")
+            logger.info(f"  Rejection rate: {stats['rejection_rate']*100:.1f}% ({stats['rejected']}/{stats['accepted']+stats['rejected']})")
+            if stats['baseline_stability']:
+                stab = stats['baseline_stability']
+                logger.info(f"  Baseline stability: mean={stab['mean_ms']:.2f}ms, std={stab['std_ms']:.2f}ms, "
+                           f"range={stab['range_ms']:.2f}ms, IQR={stab['iqr_ms']:.2f}ms")
+                logger.info(f"  → Phase 1 Impact: Reduced variance from wild jumps")
 
         # Store in history
         with self.lock:

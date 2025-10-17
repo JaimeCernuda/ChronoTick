@@ -301,6 +301,10 @@ class DatasetManager:
         self.drift_rates = []  # List of (timestamp, drift_us_per_s) tuples
         self.current_drift_estimate = 0.0  # Latest drift rate estimate (μs/s)
 
+        # Phase 3 tracking for test analysis
+        self.drift_calculation_count = 0
+        self.drift_rate_history = []  # For statistical analysis
+
     def calculate_drift_rate(self, prev_measurement: NTPMeasurement,
                             curr_measurement: NTPMeasurement) -> float:
         """
@@ -333,8 +337,12 @@ class DatasetManager:
         # Calculate drift rate (μs/s)
         drift_rate = offset_change_us / dt
 
+        # Determine drift direction and magnitude for logging
+        direction = "FAST" if drift_rate > 0 else "SLOW" if drift_rate < 0 else "STABLE"
+        magnitude = abs(drift_rate)
+
         logger.info(f"[DRIFT_CALC] Δt={dt:.1f}s, Δoffset={offset_change_us:.0f}μs, "
-                   f"drift={drift_rate:.3f}μs/s")
+                   f"drift={drift_rate:+.3f}μs/s ({direction}, |{magnitude:.3f}|μs/s)")
 
         return drift_rate
 
@@ -354,10 +362,24 @@ class DatasetManager:
                 # Store drift rate history
                 self.drift_rates.append((measurement.timestamp, calculated_drift))
                 self.current_drift_estimate = calculated_drift
+                self.drift_calculation_count += 1
+                self.drift_rate_history.append(calculated_drift)
 
                 # Keep drift history manageable (last 100 measurements)
                 if len(self.drift_rates) > 100:
                     self.drift_rates = self.drift_rates[-50:]
+                if len(self.drift_rate_history) > 100:
+                    self.drift_rate_history = self.drift_rate_history[-50:]
+
+                # Periodic Phase 3 statistics (every 10 drift calculations)
+                if self.drift_calculation_count % 10 == 0:
+                    drift_array = np.array(self.drift_rate_history)
+                    logger.info(f"[PHASE3_STATS] Drift Rate Summary after {self.drift_calculation_count} calculations:")
+                    logger.info(f"  Mean drift: {np.mean(drift_array):+.3f}μs/s, "
+                               f"Std: {np.std(drift_array):.3f}μs/s")
+                    logger.info(f"  Range: [{np.min(drift_array):+.3f}, {np.max(drift_array):+.3f}]μs/s")
+                    logger.info(f"  Current: {calculated_drift:+.3f}μs/s")
+                    logger.info(f"  → Phase 3 Impact: Tracking clock drift for predictive corrections")
 
             # Store measurement with calculated drift
             self.measurement_dataset[int(measurement.timestamp)] = {
@@ -1215,15 +1237,32 @@ class DatasetManager:
                         (1 - self.baseline_smoothing_alpha) * self.smoothed_baseline
                     )
 
-                    # Log significant changes (>10ms delta)
-                    delta = abs(self.smoothed_baseline - previous_smoothed) * 1000  # ms
-                    if delta > 10.0:
+                    # Track Phase 2 effectiveness
+                    self.baseline_update_count += 1
+                    raw_jump = abs(raw_baseline - previous_smoothed) * 1000  # What jump WOULD have been
+                    smoothed_jump = abs(self.smoothed_baseline - previous_smoothed) * 1000  # Actual jump
+                    suppressed_jump = raw_jump - smoothed_jump  # How much we smoothed
+
+                    self.total_raw_jump += raw_jump
+                    self.total_smoothed_jump += smoothed_jump
+
+                    # Log significant changes (>10ms smoothed delta)
+                    if smoothed_jump > 10.0:
                         logger.info(f"[BASELINE_SMOOTHING] Raw: {raw_baseline*1000:.3f}ms, "
                                    f"Smoothed: {self.smoothed_baseline*1000:.3f}ms "
-                                   f"(Δ{delta:.1f}ms from prev)")
+                                   f"(suppressed {suppressed_jump:.1f}ms of {raw_jump:.1f}ms jump)")
                     else:
                         logger.debug(f"[BASELINE_SMOOTHING] Raw: {raw_baseline*1000:.3f}ms, "
                                     f"Smoothed: {self.smoothed_baseline*1000:.3f}ms")
+
+                    # Periodic statistics for test analysis (every 20 updates)
+                    if self.baseline_update_count % 20 == 0:
+                        avg_suppression = (self.total_raw_jump - self.total_smoothed_jump) / self.baseline_update_count
+                        suppression_rate = ((self.total_raw_jump - self.total_smoothed_jump) / self.total_raw_jump * 100) if self.total_raw_jump > 0 else 0
+                        logger.info(f"[PHASE2_STATS] Baseline Smoothing Summary after {self.baseline_update_count} updates:")
+                        logger.info(f"  Average jump suppression: {avg_suppression:.2f}ms per update")
+                        logger.info(f"  Overall suppression rate: {suppression_rate:.1f}% (reduced {self.total_raw_jump - self.total_smoothed_jump:.1f}ms total)")
+                        logger.info(f"  → Phase 2 Impact: Stabilized baseline by suppressing {suppression_rate:.1f}% of raw volatility")
 
                 baseline = self.smoothed_baseline
             else:
@@ -1424,6 +1463,12 @@ class RealDataPipeline:
         self.baseline_smoothing_enabled = baseline_smoothing_config.get('enabled', True)
         self.baseline_smoothing_alpha = baseline_smoothing_config.get('alpha', 0.3)  # 0.3 = moderate smoothing
         self.smoothed_baseline = None  # Will be initialized on first NTP measurement
+
+        # Phase 2 tracking for test analysis
+        self.baseline_update_count = 0
+        self.total_raw_jump = 0.0  # Track cumulative raw baseline changes
+        self.total_smoothed_jump = 0.0  # Track cumulative smoothed baseline changes
+
         logger.info(f"[BASELINE_SMOOTHING] Enabled: {self.baseline_smoothing_enabled}, "
                    f"alpha={self.baseline_smoothing_alpha} ({'moderate' if self.baseline_smoothing_alpha == 0.3 else 'light' if self.baseline_smoothing_alpha > 0.3 else 'heavy'} smoothing)")
 

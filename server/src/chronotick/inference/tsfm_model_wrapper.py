@@ -188,25 +188,31 @@ class TSFMModelWrapper:
                 return multivariate_history
 
             else:
-                # Original univariate approach
-                recent_measurements, normalization_bias = self.dataset_manager.get_recent_measurements(
-                    window_seconds=None,
-                    normalize=True
-                )
+                # Univariate approach: Get offsets for training, but ALSO retrieve drift for Phase 3D
+                # CRITICAL FIX: Must call get_recent_measurements_with_drift() to update self.current_drift
+                recent_measurements, normalization_bias, current_drift = \
+                    self.dataset_manager.get_recent_measurements_with_drift(
+                        window_seconds=None,
+                        normalize=True
+                    )
 
                 if not recent_measurements:
                     logger.warning("No recent measurements available from dataset manager")
                     return None
 
-                # Store normalization bias for denormalization later
+                # Store normalization bias AND drift (Phase 3D fix)
                 self.normalization_bias = normalization_bias
+                self.current_drift = current_drift  # CRITICAL: Update drift for Phase 3D
+
                 if normalization_bias is not None:
-                    logger.info(f"[NORMALIZATION] Model will train on residuals (baseline: {normalization_bias*1000:.3f}ms)")
+                    logger.info(f"[NORMALIZATION] Univariate model training on residuals "
+                               f"(baseline: {normalization_bias*1000:.3f}ms, drift: {current_drift:.3f}μs/s)")
 
-                # Extract offsets (measurements are tuples of (timestamp, offset))
-                offsets = np.array([offset for timestamp, offset in recent_measurements])
+                # Extract only offsets for univariate training (ignore drift channel)
+                offsets = np.array([offset for timestamp, offset, drift in recent_measurements])
 
-                logger.debug(f"Retrieved {len(offsets)} historical offsets (normalized)")
+                logger.debug(f"Retrieved {len(offsets)} historical offsets (normalized), "
+                           f"drift={current_drift:.3f}μs/s for Phase 3D correction")
                 return offsets
 
         except Exception as e:
@@ -287,12 +293,25 @@ class TSFMModelWrapper:
             # Phase 3D: Use calculated drift rate from NTP measurements
             # Convert from μs/s to s/s for consistency
             drift = self.current_drift * 1e-6  # Convert μs/s → s/s
+            drift_source = "ntp_calc"  # Track where drift came from
 
             # Fallback: approximate from consecutive predictions if no drift available
             if drift == 0.0 and i < num_predictions - 1:
                 drift = float(prediction_result.predictions[i + 1] - prediction_result.predictions[i])
+                drift_source = "pred_approx"
             elif drift == 0.0 and i > 0:
                 drift = float(prediction_result.predictions[i] - prediction_result.predictions[i - 1])
+                drift_source = "pred_approx"
+            elif drift == 0.0:
+                drift_source = "none"
+
+            # Log Phase 3D application for verification (first prediction only)
+            if i == 0:
+                logger.info(f"[PHASE3D_APPLY] Drift correction applied: "
+                           f"drift={self.current_drift:.3f}μs/s ({drift*1e6:.3f}μs/s as s/s), "
+                           f"source={drift_source}")
+                if drift_source == "ntp_calc":
+                    logger.info(f"  → Phase 3 Impact: Using real NTP-calculated drift rate")
 
             # Get uncertainty
             if prediction_result.uncertainty is not None and i < len(prediction_result.uncertainty):
