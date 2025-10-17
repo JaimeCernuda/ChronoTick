@@ -298,6 +298,7 @@ class PredictiveScheduler:
     def _cap_prediction_offset(self, offset: float) -> tuple:
         """
         Cap prediction offset to prevent runaway predictions.
+        Capping is RELATIVE to current NTP baseline, not absolute.
 
         Args:
             offset: Raw prediction offset (seconds)
@@ -307,10 +308,30 @@ class PredictiveScheduler:
         """
         magnitude = abs(offset)
 
-        # Apply hard limits
-        if magnitude > self.absolute_max:
-            capped_offset = math.copysign(self.absolute_max, offset)
-            logger.warning(f"[SCHEDULER_CAP] Capped prediction from {offset*1000:.2f}ms to {capped_offset*1000:.2f}ms (exceeded {self.absolute_max*1000:.0f}ms limit)")
+        # Get current NTP baseline from CPU model (if available)
+        last_ntp_offset = None
+        max_multiplier = 2.5  # Default
+        if self.cpu_model and hasattr(self.cpu_model, 'last_ntp_offset'):
+            last_ntp_offset = self.cpu_model.last_ntp_offset
+        if self.cpu_model and hasattr(self.cpu_model, 'max_multiplier'):
+            max_multiplier = self.cpu_model.max_multiplier
+
+        # Calculate cap based on NTP baseline
+        if last_ntp_offset is not None:
+            # Cap is RELATIVE to NTP baseline: allow up to NTP_magnitude * max_multiplier
+            last_ntp_magnitude = abs(last_ntp_offset)
+            cap = last_ntp_magnitude * max_multiplier
+            cap = max(cap, self.absolute_min)  # At least min_cap
+            # NOTE: absolute_max NOT applied - cap scales with NTP baseline
+        else:
+            # No NTP reference yet - use absolute_max as fallback during initialization
+            cap = self.absolute_max
+            logger.debug(f"[SCHEDULER_CAP] No NTP baseline yet, using absolute_max={self.absolute_max*1000:.0f}ms as cap")
+
+        # Apply cap
+        if magnitude > cap:
+            capped_offset = math.copysign(cap, offset)
+            logger.warning(f"[SCHEDULER_CAP] Capped prediction from {offset*1000:.2f}ms to {capped_offset*1000:.2f}ms (exceeded {cap*1000:.0f}ms limit, NTP baseline={(last_ntp_offset*1000 if last_ntp_offset else 0):.0f}ms)")
             return capped_offset, True
         elif magnitude < self.absolute_min:
             capped_offset = math.copysign(self.absolute_min, offset)
