@@ -12,6 +12,9 @@ clock_measurement:
     - time.nist.gov
     - time.google.com
     timeout_seconds: 2.0
+    # Phase 1: NTP Outlier Rejection
+    outlier_window_size: 20
+    outlier_sigma_threshold: 3.0
   timing:
     normal_operation:
       measurement_interval: 120  # 2 minutes (was 180s/3min) - faster learning
@@ -56,6 +59,10 @@ performance:
   max_memory_mb: 2048
   model_timeout: 10.0
 prediction_scheduling:
+  # Phase 2: Baseline Smoothing
+  baseline_smoothing:
+    enabled: true
+    alpha: 0.3  # EMA coefficient (0.3 = 30% new, 70% old)
   cpu_model:
     max_inference_time: 2.0
     prediction_horizon: 30
