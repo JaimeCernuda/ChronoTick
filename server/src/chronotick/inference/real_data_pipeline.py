@@ -285,16 +285,28 @@ class DatasetManager:
     Phase 3A: Now tracks drift rates calculated from consecutive NTP measurements.
     """
 
-    def __init__(self, max_dataset_size=1000):
+    def __init__(self, max_dataset_size=1000, baseline_smoothing_enabled=True, baseline_smoothing_alpha=0.3):
         """Initialize dataset manager
 
         Args:
             max_dataset_size: Maximum number of measurements to keep in dataset (sliding window)
+            baseline_smoothing_enabled: Enable exponential smoothing for baseline
+            baseline_smoothing_alpha: EMA smoothing coefficient (0-1)
         """
         self.measurement_dataset = {}  # timestamp -> {offset, drift, source, uncertainty}
         self.prediction_history = []   # List of (timestamp, prediction) tuples
         self.lock = threading.RLock()  # Use reentrant lock to allow nested lock acquisition
         self.max_dataset_size = max_dataset_size  # FIX #1: Dataset sliding window
+
+        # Phase 2: Baseline Smoothing attributes
+        self.baseline_smoothing_enabled = baseline_smoothing_enabled
+        self.baseline_smoothing_alpha = baseline_smoothing_alpha
+        self.smoothed_baseline = None  # Will be initialized on first NTP measurement
+
+        # Phase 2 tracking for test analysis
+        self.baseline_update_count = 0
+        self.total_raw_jump = 0.0  # Track cumulative raw baseline changes
+        self.total_smoothed_jump = 0.0  # Track cumulative smoothed baseline changes
 
         # Phase 3A: Drift rate tracking
         self.previous_ntp_measurement = None  # Track previous NTP for drift calculation
@@ -1455,22 +1467,22 @@ class RealDataPipeline:
 
         # FIX #1: Load max_dataset_size from config for sliding window
         max_dataset_size = config.get('prediction_scheduling', {}).get('dataset', {}).get('max_history_size', 1000)
-        self.dataset_manager = DatasetManager(max_dataset_size=max_dataset_size)
-        logger.info(f"Dataset Manager: max_history_size={max_dataset_size} (sliding window)")
 
         # Baseline Smoothing (Phase 2) - Exponential Moving Average
         baseline_smoothing_config = config.get('prediction_scheduling', {}).get('baseline_smoothing', {})
-        self.baseline_smoothing_enabled = baseline_smoothing_config.get('enabled', True)
-        self.baseline_smoothing_alpha = baseline_smoothing_config.get('alpha', 0.3)  # 0.3 = moderate smoothing
-        self.smoothed_baseline = None  # Will be initialized on first NTP measurement
+        baseline_smoothing_enabled = baseline_smoothing_config.get('enabled', True)
+        baseline_smoothing_alpha = baseline_smoothing_config.get('alpha', 0.3)  # 0.3 = moderate smoothing
 
-        # Phase 2 tracking for test analysis
-        self.baseline_update_count = 0
-        self.total_raw_jump = 0.0  # Track cumulative raw baseline changes
-        self.total_smoothed_jump = 0.0  # Track cumulative smoothed baseline changes
+        # Initialize DatasetManager with baseline smoothing settings
+        self.dataset_manager = DatasetManager(
+            max_dataset_size=max_dataset_size,
+            baseline_smoothing_enabled=baseline_smoothing_enabled,
+            baseline_smoothing_alpha=baseline_smoothing_alpha
+        )
+        logger.info(f"Dataset Manager: max_history_size={max_dataset_size} (sliding window)")
 
-        logger.info(f"[BASELINE_SMOOTHING] Enabled: {self.baseline_smoothing_enabled}, "
-                   f"alpha={self.baseline_smoothing_alpha} ({'moderate' if self.baseline_smoothing_alpha == 0.3 else 'light' if self.baseline_smoothing_alpha > 0.3 else 'heavy'} smoothing)")
+        logger.info(f"[BASELINE_SMOOTHING] Enabled: {baseline_smoothing_enabled}, "
+                   f"alpha={baseline_smoothing_alpha} ({'moderate' if baseline_smoothing_alpha == 0.3 else 'light' if baseline_smoothing_alpha > 0.3 else 'heavy'} smoothing)")
 
         # LAYER 1: Ultra-Aggressive Capping (simplified formula)
         adaptive_capping_config = config.get('prediction_scheduling', {}).get('adaptive_capping', {})
