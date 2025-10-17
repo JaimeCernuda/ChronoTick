@@ -281,8 +281,10 @@ class DatasetManager:
     """
     Maintains consistent 1-second measurement frequency for TSFM models.
     Applies retrospective correction when new NTP data arrives.
+
+    Phase 3A: Now tracks drift rates calculated from consecutive NTP measurements.
     """
-    
+
     def __init__(self, max_dataset_size=1000):
         """Initialize dataset manager
 
@@ -293,26 +295,92 @@ class DatasetManager:
         self.prediction_history = []   # List of (timestamp, prediction) tuples
         self.lock = threading.RLock()  # Use reentrant lock to allow nested lock acquisition
         self.max_dataset_size = max_dataset_size  # FIX #1: Dataset sliding window
-        
+
+        # Phase 3A: Drift rate tracking
+        self.previous_ntp_measurement = None  # Track previous NTP for drift calculation
+        self.drift_rates = []  # List of (timestamp, drift_us_per_s) tuples
+        self.current_drift_estimate = 0.0  # Latest drift rate estimate (μs/s)
+
+    def calculate_drift_rate(self, prev_measurement: NTPMeasurement,
+                            curr_measurement: NTPMeasurement) -> float:
+        """
+        Calculate clock drift rate between two NTP measurements.
+
+        Phase 3A: Drift rate calculation from consecutive NTP measurements.
+
+        Drift rate represents how fast the local clock is gaining or losing time
+        relative to the NTP reference clock.
+
+        Formula:
+            drift_rate = Δoffset / Δt
+            where:
+                Δoffset = curr_offset - prev_offset (in microseconds)
+                Δt = curr_timestamp - prev_timestamp (in seconds)
+
+        Returns:
+            drift_rate in μs/s (positive = clock running fast, negative = running slow)
+        """
+        # Calculate time interval between measurements
+        dt = curr_measurement.timestamp - prev_measurement.timestamp
+
+        if dt <= 0:
+            logger.warning(f"[DRIFT_CALC] Invalid time interval: dt={dt:.3f}s, cannot calculate drift")
+            return 0.0
+
+        # Calculate offset change in microseconds
+        offset_change_us = (curr_measurement.offset - prev_measurement.offset) * 1e6
+
+        # Calculate drift rate (μs/s)
+        drift_rate = offset_change_us / dt
+
+        logger.info(f"[DRIFT_CALC] Δt={dt:.1f}s, Δoffset={offset_change_us:.0f}μs, "
+                   f"drift={drift_rate:.3f}μs/s")
+
+        return drift_rate
+
     def add_ntp_measurement(self, measurement: NTPMeasurement):
-        """Add real NTP measurement to dataset"""
+        """Add real NTP measurement to dataset
+
+        Phase 3A: Now calculates and stores drift rate if previous measurement exists.
+        """
         with self.lock:
+            # Phase 3A: Calculate drift rate from previous measurement
+            calculated_drift = 0.0
+            if self.previous_ntp_measurement is not None:
+                calculated_drift = self.calculate_drift_rate(
+                    self.previous_ntp_measurement,
+                    measurement
+                )
+                # Store drift rate history
+                self.drift_rates.append((measurement.timestamp, calculated_drift))
+                self.current_drift_estimate = calculated_drift
+
+                # Keep drift history manageable (last 100 measurements)
+                if len(self.drift_rates) > 100:
+                    self.drift_rates = self.drift_rates[-50:]
+
+            # Store measurement with calculated drift
             self.measurement_dataset[int(measurement.timestamp)] = {
                 'timestamp': measurement.timestamp,
                 'offset': measurement.offset,
-                'drift': 0.0,  # Will be calculated from sequence
+                'drift': calculated_drift,  # Phase 3A: Now using calculated drift
                 'source': 'ntp_measurement',
                 'uncertainty': measurement.uncertainty,
                 'corrected': False
             }
 
+            # Update previous measurement tracker
+            self.previous_ntp_measurement = measurement
+
             # DETAILED DEBUG: Show what we're storing
             logger.info(f"[DATASET_ADD_NTP] ▶▶▶ STORED NTP measurement:")
             logger.info(f"  Timestamp: {measurement.timestamp:.2f} ({int(measurement.timestamp)})")
             logger.info(f"  Offset: {measurement.offset*1000:.3f}ms")
+            logger.info(f"  Drift: {calculated_drift:.3f}μs/s")  # Phase 3A
             logger.info(f"  Uncertainty: {measurement.uncertainty*1000:.3f}ms")
             logger.info(f"  Source: ntp_measurement")
             logger.info(f"  Dataset size: {len(self.measurement_dataset)} entries")
+            logger.info(f"  Drift history: {len(self.drift_rates)} entries")
 
     def add_prediction(self, timestamp: float, offset: float, drift: float,
                       source: str, uncertainty: float, confidence: float, was_capped: bool = False):
@@ -1229,7 +1297,80 @@ class DatasetManager:
                 logger.warning(f"[DATASET_GET_MEASUREMENTS] ◀◀◀ EMPTY dataset! No measurements to return")
 
             return measurements, normalization_bias
-    
+
+    def get_recent_measurements_with_drift(self, window_seconds: int = None,
+                                          normalize: bool = True) -> Tuple[List[Tuple[float, float, float]], Optional[float], float]:
+        """
+        Get recent measurements with both offset AND drift for multivariate model training.
+
+        Phase 3A: New method to support TimesFM multivariate predictions.
+
+        Args:
+            window_seconds: Time window in seconds. If None, returns ALL measurements.
+            normalize: If True, subtract NTP baseline from offsets (zero-centering).
+
+        Returns:
+            Tuple of (measurements, normalization_bias, current_drift):
+            - measurements: List of (timestamp, offset, drift) tuples sorted by timestamp
+            - normalization_bias: The value subtracted from offsets (None if not normalized)
+            - current_drift: Latest drift rate estimate (μs/s)
+        """
+        with self.lock:
+            if window_seconds is None:
+                # No time filtering - return ALL accumulated measurements
+                measurements = [(ts, data['offset'], data['drift'])
+                              for ts, data in self.measurement_dataset.items()]
+            else:
+                # Apply time window filtering
+                current_time = time.time()
+                cutoff_time = current_time - window_seconds
+
+                measurements = []
+                for timestamp, data in self.measurement_dataset.items():
+                    if timestamp >= cutoff_time:
+                        measurements.append((timestamp, data['offset'], data['drift']))
+
+            # Sort by timestamp
+            measurements.sort(key=lambda x: x[0])
+
+            # Apply offset normalization if requested (drift stays unchanged)
+            normalization_bias = None
+            if normalize and measurements:
+                # Get recent NTP baseline for normalization
+                normalization_bias = self.get_recent_ntp_baseline(lookback_count=10)
+
+                if normalization_bias is not None:
+                    # Subtract baseline from offsets only, keep drift unchanged
+                    measurements = [(ts, offset - normalization_bias, drift)
+                                  for ts, offset, drift in measurements]
+                    logger.info(f"[NORMALIZATION] ✓ Applied offset normalization for multivariate: "
+                               f"baseline={normalization_bias*1000:.3f}ms")
+
+            # DETAILED DEBUG: Show multivariate data
+            if measurements:
+                offsets_ms = [m[1]*1000 for m in measurements]
+                drifts_us_per_s = [m[2] for m in measurements]
+
+                logger.info(f"[DATASET_GET_MULTIVARIATE] ◀◀◀ RETURNING multivariate data for ML:")
+                logger.info(f"  Count: {len(measurements)} measurements")
+                logger.info(f"  Time range: {measurements[0][0]:.0f} - {measurements[-1][0]:.0f}")
+                logger.info(f"  Duration: {measurements[-1][0] - measurements[0][0]:.0f}s")
+                logger.info(f"  Offset range: {min(offsets_ms):.3f}ms - {max(offsets_ms):.3f}ms")
+                logger.info(f"  Offset mean: {np.mean(offsets_ms):.3f}ms, std: {np.std(offsets_ms):.3f}ms")
+                logger.info(f"  Drift range: {min(drifts_us_per_s):.3f} - {max(drifts_us_per_s):.3f}μs/s")
+                logger.info(f"  Drift mean: {np.mean(drifts_us_per_s):.3f}μs/s, std: {np.std(drifts_us_per_s):.3f}μs/s")
+                logger.info(f"  Current drift estimate: {self.current_drift_estimate:.3f}μs/s")
+                logger.info(f"  Normalized: {normalize} (baseline: {normalization_bias*1000:.3f}ms)"
+                           if normalization_bias else f"  Normalized: {normalize}")
+
+                # Show first 3 and last 3 measurements
+                logger.info(f"  First 3: {[(t, o*1000, d) for t, o, d in measurements[:3]]}")
+                logger.info(f"  Last 3: {[(t, o*1000, d) for t, o, d in measurements[-3:]]}")
+            else:
+                logger.warning(f"[DATASET_GET_MULTIVARIATE] ◀◀◀ EMPTY dataset!")
+
+            return measurements, normalization_bias, self.current_drift_estimate
+
     def calculate_drift_from_measurements(self, measurements: List[Tuple[float, float]]) -> float:
         """Calculate drift rate from recent offset measurements"""
         if len(measurements) < 2:
