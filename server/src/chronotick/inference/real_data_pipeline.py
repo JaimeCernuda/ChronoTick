@@ -1356,7 +1356,7 @@ class RealDataPipeline:
         # Set model interfaces for predictive scheduler
         # CRITICAL FIX: Inject dataset_manager so scheduler writes predictions at 1Hz for autoregressive training
         self.predictive_scheduler.set_model_interfaces(
-            cpu_model, gpu_model, self.fusion_engine, self.dataset_manager
+            cpu_model, gpu_model, self.fusion_engine, dataset_manager=self.dataset_manager
         )
         logger.info(f"Models configured: cpu_model={'Yes' if cpu_model else 'No'}, "
                    f"gpu_model={'Yes' if gpu_model else 'No'}, "
