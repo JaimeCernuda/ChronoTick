@@ -4,12 +4,13 @@ Long-term stability test for ChronoTick.
 Continuously measures ChronoTick, system clock, and NTP for overnight stability analysis.
 
 This test runs indefinitely and logs to:
-- CSV: results/long_term_stability/chronotick_stability_{timestamp}.csv
-- Log: results/long_term_stability/test.log
+- CSV: {output_dir}/chronotick_stability_{timestamp}.csv
+- Log: {output_dir}/test.log
 """
 
 import time
 import sys
+import argparse
 from pathlib import Path
 from datetime import datetime
 import ntplib
@@ -23,49 +24,57 @@ from chronotick.inference.engine import ChronoTickInferenceEngine
 from chronotick.inference.real_data_pipeline import RealDataPipeline
 from chronotick.inference.tsfm_model_wrapper import create_model_wrappers
 
-# Create results directory
-results_dir = Path("results/long_term_stability")
-results_dir.mkdir(parents=True, exist_ok=True)
-
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(results_dir / 'test.log'),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-logger = logging.getLogger(__name__)
-
-# CSV output with timestamp
-timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-csv_path = results_dir / f"chronotick_stability_{timestamp_str}.csv"
-
-# NTP client
-ntp_client = ntplib.NTPClient()
-ntp_servers = ["pool.ntp.org", "time.google.com", "time.nist.gov"]
-
-def get_ntp_offset():
-    """Get NTP offset, try multiple servers"""
-    for server in ntp_servers:
-        try:
-            response = ntp_client.request(server, version=3, timeout=2)
-            return response.offset, response.delay, server
-        except Exception as e:
-            continue
-    return None, None, None
-
 def main():
+    # Parse arguments
+    parser = argparse.ArgumentParser(description='Long-term stability test for ChronoTick')
+    parser.add_argument('--config', default='configs/config_test_drift_aware.yaml', help='Config file path')
+    parser.add_argument('--duration', type=int, help='Test duration in seconds (optional)')
+    parser.add_argument('--output-dir', default='results/long_term_stability', help='Output directory for results')
+    args = parser.parse_args()
+
+    # Create results directory
+    results_dir = Path(args.output_dir)
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    # CSV output with timestamp
+    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    csv_path = results_dir / f"chronotick_stability_{timestamp_str}.csv"
+
+    # Setup logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(results_dir / 'test.log'),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+    logger = logging.getLogger(__name__)
+
+    # NTP client
+    ntp_client = ntplib.NTPClient()
+    ntp_servers = ["pool.ntp.org", "time.google.com", "time.nist.gov"]
+
+    def get_ntp_offset():
+        """Get NTP offset, try multiple servers"""
+        for server in ntp_servers:
+            try:
+                response = ntp_client.request(server, version=3, timeout=2)
+                return response.offset, response.delay, server
+            except Exception as e:
+                continue
+        return None, None, None
+
     logger.info("=" * 80)
     logger.info("CHRONOTICK LONG-TERM STABILITY TEST - STARTING")
     logger.info("=" * 80)
     logger.info(f"Results will be saved to: {csv_path}")
+    logger.info(f"Output directory: {results_dir}")
     logger.info("Test will run indefinitely. Press Ctrl+C to stop.")
     logger.info("")
 
     # Initialize ChronoTick (proper way, like working test scripts)
-    config_path = "configs/config_test_drift_aware.yaml"
+    config_path = args.config
     logger.info(f"Loading configuration from {config_path}")
 
     # Initialize engine with models
@@ -79,12 +88,8 @@ def main():
     cpu_wrapper, gpu_wrapper = create_model_wrappers(
         engine, pipeline.dataset_manager, pipeline.system_metrics
     )
+    # NOTE: pipeline.initialize() now injects dataset_manager into scheduler automatically
     pipeline.initialize(cpu_model=cpu_wrapper, gpu_model=gpu_wrapper)
-    pipeline.predictive_scheduler.set_model_interfaces(
-        cpu_model=cpu_wrapper,
-        gpu_model=gpu_wrapper,
-        fusion_engine=pipeline.fusion_engine
-    )
     logger.info("✓ Pipeline initialized")
 
     logger.info("Waiting for warm-up phase (60 seconds)...")
