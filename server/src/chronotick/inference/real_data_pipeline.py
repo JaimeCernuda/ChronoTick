@@ -1695,12 +1695,12 @@ class RealDataPipeline:
 
     def _apply_adaptive_capping(self, correction: CorrectionWithBounds, current_time: float) -> tuple:
         """
-        LAYER 1: Ultra-Aggressive Capping (simplified formula).
+        LAYER 1: Adaptive Capping (follows NTP baseline).
 
-        New formula: Cap = min(max(NTP_magnitude * multiplier, min_cap), max_cap)
-        - No drift term (that caused 2.3s disaster)
-        - Hard limits prevent catastrophic predictions
-        - Much tighter bounds than before
+        Cap formula: Cap = max(NTP_magnitude * multiplier, absolute_min)
+        - Cap grows with NTP baseline (allows correcting unsynchronized clocks)
+        - No absolute_max here (that's for sanity check layer only)
+        - Minimum cap prevents predictions from going too close to zero
 
         Returns:
             Tuple of (capped_correction, was_capped, sanity_passed)
@@ -1709,11 +1709,11 @@ class RealDataPipeline:
             logger.debug(f"[LAYER 1] No NTP reference yet, skipping capping")
             return correction, False, True
 
-        # Calculate cap using simplified formula
+        # Calculate cap RELATIVE to NTP baseline (not absolute)
         last_ntp_magnitude = abs(self.last_ntp_offset)
         cap = last_ntp_magnitude * self.max_multiplier
-        cap = max(cap, self.absolute_min)  # At least min_cap
-        cap = min(cap, self.absolute_max)  # At most max_cap
+        cap = max(cap, self.absolute_min)  # At least min_cap to prevent near-zero predictions
+        # NO absolute_max ceiling here! Let cap follow NTP baseline for unsynchronized clocks
 
         prediction_magnitude = abs(correction.offset_correction)
 
