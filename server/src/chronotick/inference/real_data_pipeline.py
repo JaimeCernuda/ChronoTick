@@ -1174,15 +1174,27 @@ class RealDataPipeline:
         logger.info(f"[LAYER 1] Ultra-Aggressive Capping: max_multiplier={self.max_multiplier}x, "
                    f"absolute_max={self.absolute_max*1000:.0f}ms, absolute_min={self.absolute_min*1000:.0f}ms")
 
-        # LAYER 2: Sanity Check Filter
+        # LAYER 2: Adaptive Sanity Check Filter
         sanity_check_config = config.get('prediction_scheduling', {}).get('sanity_check', {})
         self.sanity_check_enabled = sanity_check_config.get('enabled', True)
-        self.sanity_absolute_limit = sanity_check_config.get('absolute_limit', 1.0)  # 1 second
+
+        # Adaptive range multiplier (replaces hardcoded absolute_limit)
+        self.adaptive_range_multiplier = sanity_check_config.get('adaptive_range_multiplier', 10.0)
+        self.absolute_min_bound = sanity_check_config.get('absolute_min_bound', 0.001)  # 1ms floor
+        self.absolute_max_bound = sanity_check_config.get('absolute_max_bound', 10.0)   # 10s ceiling
+
+        # Fallback limits (used if not enough NTP data for adaptive)
         self.sanity_relative_limit = sanity_check_config.get('relative_limit', 5.0)  # 5x NTP
         self.sanity_statistical_limit = sanity_check_config.get('statistical_limit', 3.0)  # 3 sigma
-        logger.info(f"[LAYER 2] Sanity Check: enabled={self.sanity_check_enabled}, "
-                   f"absolute={self.sanity_absolute_limit*1000:.0f}ms, "
-                   f"relative={self.sanity_relative_limit}x, statistical={self.sanity_statistical_limit}σ")
+
+        # Adaptive bounds (calculated from NTP observations)
+        self.adaptive_lower_bound = self.absolute_min_bound  # Start at floor
+        self.adaptive_upper_bound = self.absolute_max_bound  # Start at ceiling
+
+        logger.info(f"[LAYER 2] Adaptive Sanity Check: enabled={self.sanity_check_enabled}")
+        logger.info(f"  Range multiplier: {self.adaptive_range_multiplier}x (predictions within avg ± {self.adaptive_range_multiplier}×avg)")
+        logger.info(f"  Hard bounds: [{self.absolute_min_bound*1000:.1f}ms, {self.absolute_max_bound*1000:.0f}ms]")
+        logger.info(f"  Fallback: relative={self.sanity_relative_limit}x, statistical={self.sanity_statistical_limit}σ")
 
         # LAYER 3: Confidence-based capping (DISABLED)
         confidence_capping_config = config.get('prediction_scheduling', {}).get('confidence_capping', {})
@@ -1446,6 +1458,9 @@ class RealDataPipeline:
                     if len(self.recent_ntp_measurements) > self.max_recent_ntp_count:
                         self.recent_ntp_measurements = self.recent_ntp_measurements[-self.max_recent_ntp_count:]
 
+                    # Update adaptive sanity bounds based on new NTP measurement
+                    self._update_adaptive_sanity_bounds()
+
             # Update count of processed measurements
             self.last_processed_ntp_count = len(all_measurements)
 
@@ -1693,14 +1708,52 @@ class RealDataPipeline:
             logger.debug(f"[LAYER 1] ✓ Prediction OK: {self.absolute_min*1000:.1f}ms <= {prediction_magnitude*1000:.1f}ms <= {cap*1000:.1f}ms")
             return correction, False, True  # Not capped, sanity passed
 
+    def _update_adaptive_sanity_bounds(self):
+        """
+        Update adaptive sanity bounds based on recent NTP measurements.
+        Called after each NTP correction to adapt to system clock behavior.
+
+        Formula:
+          avg_error = mean(|recent_ntp_offsets|)
+          lower_bound = max(absolute_min_bound, avg_error - multiplier × avg_error)
+          upper_bound = min(absolute_max_bound, avg_error + multiplier × avg_error)
+        """
+        if len(self.recent_ntp_measurements) < 2:
+            # Not enough data - use hard bounds
+            logger.debug(f"[ADAPTIVE_SANITY] Not enough NTP data ({len(self.recent_ntp_measurements)} measurements), using hard bounds")
+            return
+
+        # Calculate average NTP error magnitude
+        recent_magnitudes = [abs(offset) for _, offset in self.recent_ntp_measurements]
+        avg_error = statistics.mean(recent_magnitudes)
+
+        # Calculate adaptive range: avg ± (multiplier × avg)
+        # Lower: avg - (multiplier × avg) = avg(1 - multiplier)
+        # Upper: avg + (multiplier × avg) = avg(1 + multiplier)
+        lower_bound = avg_error * (1 - self.adaptive_range_multiplier)
+        upper_bound = avg_error * (1 + self.adaptive_range_multiplier)
+
+        # Enforce hard bounds (never go beyond these)
+        self.adaptive_lower_bound = max(self.absolute_min_bound, lower_bound)
+        self.adaptive_upper_bound = min(self.absolute_max_bound, upper_bound)
+
+        logger.info(f"[ADAPTIVE_SANITY] ✅ Updated adaptive bounds from {len(self.recent_ntp_measurements)} NTP measurements:")
+        logger.info(f"  Avg NTP error: {avg_error*1000:.2f}ms")
+        logger.info(f"  Calculated range: [{lower_bound*1000:.2f}ms, {upper_bound*1000:.2f}ms]")
+        logger.info(f"  Applied range: [{self.adaptive_lower_bound*1000:.2f}ms, {self.adaptive_upper_bound*1000:.2f}ms]")
+        logger.info(f"  (Hard bounds: [{self.absolute_min_bound*1000:.2f}ms, {self.absolute_max_bound*1000:.0f}ms])")
+
     def _sanity_check_prediction(self, correction: CorrectionWithBounds, current_time: float) -> tuple:
         """
-        LAYER 2: Sanity check filter to catch catastrophic predictions.
+        LAYER 2: Adaptive sanity check filter to catch catastrophic predictions.
 
-        Checks:
-        1. Absolute limit: prediction < 1 second
-        2. Relative limit: prediction < 5x average NTP
-        3. Statistical limit: prediction < 3σ from NTP mean
+        Uses adaptive bounds learned from system clock behavior:
+        - Lower bound: avg_error - (multiplier × avg_error)
+        - Upper bound: avg_error + (multiplier × avg_error)
+
+        Fallback checks (if adaptive bounds not yet calculated):
+        1. Relative limit: prediction < 5x average NTP
+        2. Statistical limit: prediction < 3σ from NTP mean
 
         Returns:
             (passed, reason) tuple
@@ -1713,9 +1766,11 @@ class RealDataPipeline:
 
         pred_magnitude = abs(correction.offset_correction)
 
-        # Check 1: Absolute limit
-        if pred_magnitude > self.sanity_absolute_limit:
-            return False, f"Exceeds {self.sanity_absolute_limit*1000:.0f}ms limit ({pred_magnitude*1000:.0f}ms)"
+        # Check 1: Adaptive absolute bounds (primary check)
+        if pred_magnitude < self.adaptive_lower_bound:
+            return False, f"Below adaptive lower bound: {pred_magnitude*1000:.1f}ms < {self.adaptive_lower_bound*1000:.1f}ms"
+        if pred_magnitude > self.adaptive_upper_bound:
+            return False, f"Exceeds adaptive upper bound: {pred_magnitude*1000:.1f}ms > {self.adaptive_upper_bound*1000:.1f}ms"
 
         # Check 2: Relative to NTP (5x threshold)
         if len(self.recent_ntp_measurements) >= 2:

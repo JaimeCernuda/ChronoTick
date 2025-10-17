@@ -82,11 +82,19 @@ prediction_scheduling:
     absolute_max: 0.300        # Hard maximum: 300ms (prevent all catastrophic predictions)
     absolute_min: 0.001        # Minimum cap: 1ms (was 5ms) - allow convergence to ±3ms NTP truth
   sanity_check:
-    # LAYER 2: Sanity Check Filter (catch anything that slips through capping)
+    # LAYER 2: Adaptive Sanity Check (learns from system clock behavior)
+    # Predictions must be within observed NTP error ± (multiplier × NTP error)
+    # Example: If avg NTP error = 10ms and multiplier = 2.0
+    #   → Lower bound: 10ms - 20ms = max(1ms, -10ms) = 1ms
+    #   → Upper bound: 10ms + 20ms = 30ms
+    #   → Valid range: [1ms, 30ms]
+    # This adapts to system characteristics (WSL2 vs normal clocks)
     enabled: true
-    absolute_limit: 1.0        # Reject any prediction > 1 second
-    relative_limit: 5.0        # Reject if > 5x average NTP magnitude
-    statistical_limit: 3.0     # Reject if > 3 sigma from NTP mean
+    adaptive_range_multiplier: 10.0  # Predictions within avg_error ± (10 × avg_error)
+    absolute_min_bound: 0.001         # Never allow predictions < 1ms (enforce sanity floor)
+    absolute_max_bound: 10.0          # Never allow predictions > 10s (catastrophic failures)
+    relative_limit: 5.0               # Fallback: Reject if > 5x average NTP magnitude
+    statistical_limit: 3.0            # Fallback: Reject if > 3 sigma from NTP mean
   confidence_capping:
     # LAYER 3: DISABLED (caused confusion with dual-capping system)
     # Keeping config structure for compatibility but not used
