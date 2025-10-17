@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 import math
 from pathlib import Path
 import yaml
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +140,13 @@ class PredictiveScheduler:
         # Prediction cache
         self.cache_size = self.config['prediction_scheduling']['dataset']['prediction_cache_size']
         self.prediction_cache: Dict[float, CorrectionWithBounds] = {}
-        
+
+        # CRITICAL: Load capping parameters to prevent runaway predictions
+        adaptive_capping = self.config['prediction_scheduling'].get('adaptive_capping', {})
+        self.absolute_max = adaptive_capping.get('absolute_max', 0.300)  # 300ms hard limit
+        self.absolute_min = adaptive_capping.get('absolute_min', 0.001)  # 1ms floor
+        logger.info(f"[SCHEDULER_CAPPING] Loaded capping limits: absolute_max={self.absolute_max*1000:.0f}ms, absolute_min={self.absolute_min*1000:.0f}ms")
+
         # Scheduler state
         self.task_queue = []  # Priority queue of scheduled tasks
         self.scheduler_thread = None
@@ -274,20 +281,43 @@ class PredictiveScheduler:
     def _schedule_gpu_prediction(self, target_time: float):
         """Schedule GPU prediction to be ready before target_time"""
         execution_time = target_time - self.gpu_lead_time
-        
+
         task = ScheduledTask(
             execution_time=execution_time,
             task_id=f"gpu_pred_{target_time}",
             task_function=self._execute_gpu_prediction,
             args=(target_time, target_time + self.gpu_horizon)
         )
-        
+
         with self.lock:
             heapq.heappush(self.task_queue, task)
             self.stats['predictions_scheduled'] += 1
-            
+
         logger.debug(f"Scheduled GPU prediction for t={target_time} (exec at t={execution_time})")
-    
+
+    def _cap_prediction_offset(self, offset: float) -> tuple:
+        """
+        Cap prediction offset to prevent runaway predictions.
+
+        Args:
+            offset: Raw prediction offset (seconds)
+
+        Returns:
+            (capped_offset, was_capped) tuple
+        """
+        magnitude = abs(offset)
+
+        # Apply hard limits
+        if magnitude > self.absolute_max:
+            capped_offset = math.copysign(self.absolute_max, offset)
+            logger.warning(f"[SCHEDULER_CAP] Capped prediction from {offset*1000:.2f}ms to {capped_offset*1000:.2f}ms (exceeded {self.absolute_max*1000:.0f}ms limit)")
+            return capped_offset, True
+        elif magnitude < self.absolute_min:
+            capped_offset = math.copysign(self.absolute_min, offset)
+            return capped_offset, True
+        else:
+            return offset, False
+
     def _execute_cpu_prediction(self, start_time: float, end_time: float):
         """Execute CPU model prediction and cache results"""
         try:
@@ -309,8 +339,11 @@ class PredictiveScheduler:
             for i, pred in enumerate(cpu_prediction):
                 timestamp = start_time + i
 
+                # CRITICAL: Cap predictions BEFORE caching and dataset storage
+                capped_offset, was_capped = self._cap_prediction_offset(pred.offset)
+
                 correction = CorrectionWithBounds(
-                    offset_correction=pred.offset,
+                    offset_correction=capped_offset,  # Use capped offset
                     drift_rate=pred.drift,
                     offset_uncertainty=pred.offset_uncertainty,
                     drift_uncertainty=pred.drift_uncertainty,
@@ -326,15 +359,16 @@ class PredictiveScheduler:
 
                 # CRITICAL FIX: Write to dataset for autoregressive training at 1Hz
                 # This ensures model trains on recent predictions, not just NTP
+                # IMPORTANT: Use CAPPED offset to prevent dataset contamination
                 if self.dataset_manager:
                     self.dataset_manager.add_prediction(
                         timestamp=timestamp,
-                        offset=pred.offset,
+                        offset=capped_offset,  # Use capped offset
                         drift=pred.drift,
                         source="cpu",
                         uncertainty=pred.offset_uncertainty,
                         confidence=pred.confidence,
-                        was_capped=False  # Scheduler predictions are pre-sanity-check
+                        was_capped=was_capped  # Track if it was capped
                     )
                     dataset_writes += 1
 
@@ -375,8 +409,11 @@ class PredictiveScheduler:
             for i, pred in enumerate(gpu_prediction):
                 timestamp = start_time + i
 
+                # CRITICAL: Cap predictions BEFORE caching and dataset storage
+                capped_offset, was_capped = self._cap_prediction_offset(pred.offset)
+
                 correction = CorrectionWithBounds(
-                    offset_correction=pred.offset,
+                    offset_correction=capped_offset,  # Use capped offset
                     drift_rate=pred.drift,
                     offset_uncertainty=pred.offset_uncertainty,
                     drift_uncertainty=pred.drift_uncertainty,
@@ -392,15 +429,16 @@ class PredictiveScheduler:
 
                 # CRITICAL FIX: Write to dataset for autoregressive training at 1Hz
                 # This ensures model trains on recent predictions, not just NTP
+                # IMPORTANT: Use CAPPED offset to prevent dataset contamination
                 if self.dataset_manager:
                     self.dataset_manager.add_prediction(
                         timestamp=timestamp,
-                        offset=pred.offset,
+                        offset=capped_offset,  # Use capped offset
                         drift=pred.drift,
                         source="gpu",
                         uncertainty=pred.offset_uncertainty,
                         confidence=pred.confidence,
-                        was_capped=False  # Scheduler predictions are pre-sanity-check
+                        was_capped=was_capped  # Track if it was capped
                     )
 
             # Update stats
