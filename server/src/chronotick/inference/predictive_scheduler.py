@@ -184,12 +184,13 @@ class PredictiveScheduler:
             logger.error(f"Failed to load config {config_path}: {e}")
             raise
     
-    def set_model_interfaces(self, cpu_model, gpu_model, fusion_engine, dataset_manager=None):
+    def set_model_interfaces(self, cpu_model, gpu_model, fusion_engine, dataset_manager=None, pipeline=None):
         """Inject model interfaces for making predictions"""
         self.cpu_model = cpu_model
         self.gpu_model = gpu_model
         self.fusion_engine = fusion_engine
         self.dataset_manager = dataset_manager  # NEW: For autoregressive feedback
+        self.pipeline = pipeline  # NEW: For accessing NTP state (last_ntp_offset, max_multiplier)
     
     def start_scheduler(self):
         """Start the predictive scheduler thread"""
@@ -308,13 +309,13 @@ class PredictiveScheduler:
         """
         magnitude = abs(offset)
 
-        # Get current NTP baseline from CPU model (if available)
+        # Get current NTP baseline from pipeline (if available)
         last_ntp_offset = None
         max_multiplier = 2.5  # Default
-        if self.cpu_model and hasattr(self.cpu_model, 'last_ntp_offset'):
-            last_ntp_offset = self.cpu_model.last_ntp_offset
-        if self.cpu_model and hasattr(self.cpu_model, 'max_multiplier'):
-            max_multiplier = self.cpu_model.max_multiplier
+        if self.pipeline and hasattr(self.pipeline, 'last_ntp_offset'):
+            last_ntp_offset = self.pipeline.last_ntp_offset
+        if self.pipeline and hasattr(self.pipeline, 'max_multiplier'):
+            max_multiplier = self.pipeline.max_multiplier
 
         # Calculate cap based on NTP baseline
         if last_ntp_offset is not None:
