@@ -1409,8 +1409,10 @@ class RealDataPipeline:
         logger.info("Checking if enough NTP data has been collected...")
         self._check_for_ntp_updates(time.time())
 
-        dataset_size = len(self.dataset_manager.get_recent_measurements())
-        logger.info(f"Dataset now has {dataset_size} NTP measurements")
+        # FIX: get_recent_measurements() returns (measurements, normalization_bias) tuple
+        measurements, _ = self.dataset_manager.get_recent_measurements(normalize=False)
+        dataset_size = len(measurements)
+        logger.info(f"Dataset now has {dataset_size} measurements")
 
         MIN_DATASET_SIZE = 10
         if dataset_size < MIN_DATASET_SIZE:
@@ -1423,7 +1425,9 @@ class RealDataPipeline:
 
     def _start_scheduler_with_data(self):
         """Actually start the scheduler once we have sufficient data"""
-        dataset_size = len(self.dataset_manager.get_recent_measurements())
+        # FIX: get_recent_measurements() returns (measurements, normalization_bias) tuple
+        measurements, _ = self.dataset_manager.get_recent_measurements(normalize=False)
+        dataset_size = len(measurements)
         logger.info(f"Starting predictive scheduler with {dataset_size} measurements...")
         self.predictive_scheduler.start_scheduler()
         logger.info("Predictive scheduler started - ML predictions now active")
