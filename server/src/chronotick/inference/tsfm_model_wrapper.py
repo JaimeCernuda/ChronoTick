@@ -68,6 +68,9 @@ class TSFMModelWrapper:
         self.dataset_manager = dataset_manager
         self.system_metrics = system_metrics_collector
 
+        # Track normalization bias for denormalization
+        self.normalization_bias = None
+
         # Determine which prediction method to use
         if model_type == 'short_term':
             self.predict_method = self.engine.predict_short_term
@@ -134,25 +137,33 @@ class TSFMModelWrapper:
 
     def _get_offset_history(self) -> Optional[np.ndarray]:
         """
-        Get historical offset data from dataset manager.
+        Get historical offset data from dataset manager with normalization.
 
         Returns:
-            Array of historical offsets, or None if insufficient data
+            Array of historical offsets (normalized), or None if insufficient data
         """
         logger.debug(f"_get_offset_history called")
         try:
             # Get ALL measurements (NTP + predictions) - no time window
-            # This enables autoregressive training on recent predictions
-            recent_measurements = self.dataset_manager.get_recent_measurements(window_seconds=None)
+            # Enable normalization to train on residuals from NTP baseline
+            recent_measurements, normalization_bias = self.dataset_manager.get_recent_measurements(
+                window_seconds=None,
+                normalize=True
+            )
 
             if not recent_measurements:
                 logger.warning("No recent measurements available from dataset manager")
                 return None
 
+            # Store normalization bias for denormalization later
+            self.normalization_bias = normalization_bias
+            if normalization_bias is not None:
+                logger.info(f"[NORMALIZATION] Model will train on residuals (baseline: {normalization_bias*1000:.3f}ms)")
+
             # Extract offsets (measurements are tuples of (timestamp, offset))
             offsets = np.array([offset for timestamp, offset in recent_measurements])
 
-            logger.debug(f"Retrieved {len(offsets)} historical offsets")
+            logger.debug(f"Retrieved {len(offsets)} historical offsets (normalized)")
             return offsets
 
         except Exception as e:
@@ -205,6 +216,8 @@ class TSFMModelWrapper:
         """
         Convert ChronoTickInferenceEngine PredictionResult to PredictiveScheduler format.
 
+        Applies denormalization to convert normalized residuals back to absolute offsets.
+
         Args:
             prediction_result: PredictionResult from inference engine
             horizon: Number of predictions needed
@@ -216,8 +229,17 @@ class TSFMModelWrapper:
         num_predictions = min(len(prediction_result.predictions), horizon)
 
         for i in range(num_predictions):
-            # Get offset prediction
-            offset = float(prediction_result.predictions[i])
+            # Get offset prediction (normalized residual)
+            offset_residual = float(prediction_result.predictions[i])
+
+            # DENORMALIZATION: Add back the NTP baseline bias
+            if self.normalization_bias is not None:
+                offset = offset_residual + self.normalization_bias
+                if i == 0:  # Log once per prediction batch
+                    logger.info(f"[DENORMALIZATION] Converting residuals to absolute offsets (bias: {self.normalization_bias*1000:.3f}ms)")
+                    logger.debug(f"  Example: residual={offset_residual*1000:.3f}ms → offset={offset*1000:.3f}ms")
+            else:
+                offset = offset_residual
 
             # Calculate drift rate (approximate from consecutive predictions)
             if i < num_predictions - 1:
@@ -240,12 +262,18 @@ class TSFMModelWrapper:
             drift_uncertainty = offset_uncertainty * 0.1
 
             # Extract quantiles for this timestep (if available)
+            # DENORMALIZATION: Quantiles also need bias adjustment
             quantiles_dict = None
             if prediction_result.quantiles is not None:
                 quantiles_dict = {}
                 for q_level, q_array in prediction_result.quantiles.items():
                     if i < len(q_array):
-                        quantiles_dict[q_level] = float(q_array[i])
+                        quantile_residual = float(q_array[i])
+                        # Denormalize quantiles too
+                        if self.normalization_bias is not None:
+                            quantiles_dict[q_level] = quantile_residual + self.normalization_bias
+                        else:
+                            quantiles_dict[q_level] = quantile_residual
 
             predictions.append(PredictionWithUncertainty(
                 offset=offset,

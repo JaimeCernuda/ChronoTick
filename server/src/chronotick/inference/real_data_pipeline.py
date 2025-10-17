@@ -883,7 +883,20 @@ class DatasetManager:
         logger.info(f"  Before: {ntp_before_offset*1000:.2f}ms @ t={ntp_before_time:.0f}")
         logger.info(f"  After: {ntp_after_offset*1000:.2f}ms @ t={ntp_after_time:.0f}")
         logger.info(f"  Interpolating across: {ntp_after_time - ntp_before_time:.0f}s")
+        logger.info(f"  Delta: {(ntp_after_offset - ntp_before_offset)*1000:.2f}ms over {ntp_after_time - ntp_before_time:.0f}s")
+        logger.info(f"  Drift rate: {(ntp_after_offset - ntp_before_offset)/(ntp_after_time - ntp_before_time)*1e6:.2f}μs/s")
         logger.info(f"[BACKTRACKING] Replacing ALL predictions in context window with NTP-interpolated values")
+
+        # CRITICAL DEBUG: Show what predictions exist in dataset before correction
+        pred_count_before_corr = 0
+        pred_range_before = []
+        for ts in sorted(self.measurement_dataset.keys()):
+            if self.measurement_dataset[ts]['source'].startswith('prediction_'):
+                pred_count_before_corr += 1
+                if len(pred_range_before) < 5 or ts > int(correction_end):
+                    pred_range_before.append((ts, self.measurement_dataset[ts]['offset']*1000))
+        logger.info(f"[BACKTRACKING] Dataset has {pred_count_before_corr} predictions before correction")
+        logger.info(f"[BACKTRACKING] Sample predictions: {pred_range_before[:10]}")
 
         # Collect all replacements for detailed logging
         replacements = []  # List of (timestamp, old_value, new_value, delta)
@@ -941,6 +954,21 @@ class DatasetManager:
                 sum_before += current_offset
                 sum_after += ntp_interpolated
                 sum_delta += replacement_delta
+
+        # CRITICAL FIX: Delete all future predictions beyond backtracking window
+        # These were made with uncorrected data and will poison future training
+        future_predictions_deleted = 0
+        for timestamp in list(self.measurement_dataset.keys()):
+            if timestamp > int(correction_end):
+                data = self.measurement_dataset[timestamp]
+                if data['source'].startswith('prediction_'):
+                    logger.debug(f"[BACKTRACKING] Deleting future prediction at t={timestamp} (beyond correction window)")
+                    del self.measurement_dataset[timestamp]
+                    future_predictions_deleted += 1
+
+        if future_predictions_deleted > 0:
+            logger.warning(f"[BACKTRACKING] 🗑️ Deleted {future_predictions_deleted} future predictions (made with uncorrected data)")
+            logger.warning(f"[BACKTRACKING] These will be regenerated with clean corrected data")
 
         # Log detailed before/after summary
         if correction_count > 0:
@@ -1070,16 +1098,52 @@ class DatasetManager:
             candidates.sort(key=lambda x: x[0], reverse=True)
             return candidates[0][1]
     
-    def get_recent_measurements(self, window_seconds: int = None) -> List[Tuple[float, float]]:
+    def get_recent_ntp_baseline(self, lookback_count: int = 10) -> Optional[float]:
+        """
+        Calculate the recent NTP baseline for offset normalization.
+
+        Uses the mean of the most recent N NTP measurements to establish
+        the absolute clock offset baseline. This baseline is then subtracted
+        from all measurements to create zero-centered training data.
+
+        Args:
+            lookback_count: Number of recent NTP measurements to average
+
+        Returns:
+            Mean NTP offset, or None if insufficient data
+        """
+        with self.lock:
+            # Find recent NTP measurements
+            ntp_measurements = []
+            for ts in sorted(self.measurement_dataset.keys(), reverse=True):
+                data = self.measurement_dataset[ts]
+                if data['source'] == 'ntp_measurement':
+                    ntp_measurements.append(data['offset'])
+                    if len(ntp_measurements) >= lookback_count:
+                        break
+
+            if len(ntp_measurements) < 2:
+                return None
+
+            baseline = float(np.mean(ntp_measurements))
+            logger.debug(f"[NORMALIZATION] NTP baseline from {len(ntp_measurements)} recent measurements: {baseline*1000:.3f}ms")
+            return baseline
+
+    def get_recent_measurements(self, window_seconds: int = None, normalize: bool = True) -> Tuple[List[Tuple[float, float]], Optional[float]]:
         """
         Get recent offset measurements for TSFM model input.
 
         Args:
             window_seconds: Time window in seconds. If None, returns ALL measurements (no filtering).
                           This prevents the dataset from being artificially truncated over time.
+            normalize: If True, subtract NTP baseline to create zero-centered training data.
+                      This prevents the model from learning absolute bias and focuses learning
+                      on drift patterns and relative changes.
 
         Returns:
-            List of (timestamp, offset) tuples sorted by timestamp
+            Tuple of (measurements, normalization_bias):
+            - measurements: List of (timestamp, offset) tuples sorted by timestamp
+            - normalization_bias: The value subtracted from offsets (None if not normalized)
         """
         with self.lock:
             if window_seconds is None:
@@ -1099,6 +1163,17 @@ class DatasetManager:
             # Sort by timestamp
             measurements.sort(key=lambda x: x[0])
 
+            # Apply offset normalization if requested
+            normalization_bias = None
+            if normalize and measurements:
+                # Get recent NTP baseline for normalization
+                normalization_bias = self.get_recent_ntp_baseline(lookback_count=10)
+
+                if normalization_bias is not None:
+                    # Subtract baseline from all offsets to create zero-centered data
+                    measurements = [(ts, offset - normalization_bias) for ts, offset in measurements]
+                    logger.info(f"[NORMALIZATION] ✓ Applied offset normalization: baseline={normalization_bias*1000:.3f}ms")
+
             # DETAILED DEBUG: Show what we're returning for ML input
             if measurements:
                 offsets_ms = [m[1]*1000 for m in measurements]
@@ -1109,6 +1184,7 @@ class DatasetManager:
                 logger.info(f"  Offset range: {min(offsets_ms):.3f}ms - {max(offsets_ms):.3f}ms")
                 logger.info(f"  Offset mean: {np.mean(offsets_ms):.3f}ms")
                 logger.info(f"  Offset std: {np.std(offsets_ms):.3f}ms")
+                logger.info(f"  Normalized: {normalize} (baseline: {normalization_bias*1000:.3f}ms)" if normalization_bias else f"  Normalized: {normalize}")
                 logger.info(f"  Window filter: {window_seconds}s" if window_seconds else "  Window filter: None (all data)")
                 # Show first 5 and last 5 measurements
                 logger.info(f"  First 5: {[(t, o*1000) for t, o in measurements[:5]]}")
@@ -1116,7 +1192,7 @@ class DatasetManager:
             else:
                 logger.warning(f"[DATASET_GET_MEASUREMENTS] ◀◀◀ EMPTY dataset! No measurements to return")
 
-            return measurements
+            return measurements, normalization_bias
     
     def calculate_drift_from_measurements(self, measurements: List[Tuple[float, float]]) -> float:
         """Calculate drift rate from recent offset measurements"""
@@ -1236,6 +1312,8 @@ class RealDataPipeline:
             'prediction_cache_hits': 0,
             'prediction_cache_misses': 0,
             'retrospective_corrections': 0,
+            'dataset_writes_from_scheduler': 0,  # NEW: Track scheduler writes
+            'dataset_writes_from_api': 0,  # NEW: Should stay at 0 after fix
             'ntp_corrections_applied': 0,
             'ntp_corrections_skipped': 0
         }
@@ -1276,10 +1354,14 @@ class RealDataPipeline:
             )
 
         # Set model interfaces for predictive scheduler
-        self.predictive_scheduler.set_model_interfaces(cpu_model, gpu_model, self.fusion_engine)
+        # CRITICAL FIX: Inject dataset_manager so scheduler writes predictions at 1Hz for autoregressive training
+        self.predictive_scheduler.set_model_interfaces(
+            cpu_model, gpu_model, self.fusion_engine, self.dataset_manager
+        )
         logger.info(f"Models configured: cpu_model={'Yes' if cpu_model else 'No'}, "
                    f"gpu_model={'Yes' if gpu_model else 'No'}, "
-                   f"fusion={'Enabled' if cpu_model and gpu_model else 'Disabled'}")
+                   f"fusion={'Enabled' if cpu_model and gpu_model else 'Disabled'}, "
+                   f"dataset_manager_injected={'Yes' if self.dataset_manager else 'No'}")
 
         # Start components (but NOT scheduler yet - wait for data)
         self.system_metrics.start_collection()
@@ -1452,6 +1534,11 @@ class RealDataPipeline:
                     self.last_ntp_offset = offset
                     self.last_ntp_uncertainty = uncertainty
 
+                # PERIODIC HEALTH CHECK: Log dataset health after every NTP measurement
+                # This verifies 1Hz coverage and detects issues early
+                if self.warm_up_complete:
+                    self.log_dataset_health()
+
                     # FIX A: Track recent NTP measurements for robust adaptive capping
                     self.recent_ntp_measurements.append((timestamp, offset))
                     # Keep only the last N measurements
@@ -1523,17 +1610,15 @@ class RealDataPipeline:
             # Combine capping flags: adaptive_capped OR sanity_failed
             was_capped = adaptive_capped or (not sanity_passed)
 
-            # NO real-time NTP blending! Dataset correction handles everything.
-            # Just store the prediction and return it.
-            self.dataset_manager.add_prediction(
-                timestamp=current_time,
-                offset=correction.offset_correction,
-                drift=correction.drift_rate,
-                source=correction.source,
-                uncertainty=correction.offset_uncertainty,
-                confidence=correction.confidence,
-                was_capped=was_capped  # FIX C: Pass capping flag
-            )
+            # CRITICAL: DO NOT write to dataset here!
+            # Scheduler already wrote this prediction at 1Hz for autoregressive training.
+            # Writing here would:
+            #   1. Create duplicate/conflicting writes (race condition)
+            #   2. Overwrite raw predictions with capped versions
+            #   3. Confuse backtracking (was_capped flag inconsistency)
+            # Capping only affects the API RESPONSE, not the training dataset.
+            logger.debug(f"[API_SERVE] Serving prediction: offset={correction.offset_correction*1000:.2f}ms, "
+                        f"capped={was_capped}, source={correction.source}")
 
             return correction
 
@@ -1547,26 +1632,20 @@ class RealDataPipeline:
                 self.stats['prediction_cache_hits'] += 1
             logger.info(f"[CACHE_HIT] Using CPU correction from cache")
 
-            # FIX #2: Apply adaptive capping BEFORE storing prediction (FIX C: returns tuple)
+            # FIX #2: Apply adaptive capping BEFORE returning to API (FIX C: returns tuple)
             cpu_correction, adaptive_capped = self._apply_adaptive_capping(cpu_correction, current_time)
 
-            # FIX #3: Apply confidence-based capping BEFORE storing prediction (FIX C: returns tuple)
+            # FIX #3: Apply confidence-based capping BEFORE returning to API (FIX C: returns tuple)
             cpu_correction, confidence_capped = self._apply_confidence_based_capping(cpu_correction)
 
             # FIX C: Combine capping flags (True if either capped)
             was_capped = adaptive_capped or confidence_capped
 
-            # NO real-time NTP blending! Dataset correction handles everything.
-            # Just store the prediction and return it.
-            self.dataset_manager.add_prediction(
-                timestamp=current_time,
-                offset=cpu_correction.offset_correction,
-                drift=cpu_correction.drift_rate,
-                source=cpu_correction.source,
-                uncertainty=cpu_correction.offset_uncertainty,
-                confidence=cpu_correction.confidence,
-                was_capped=was_capped  # FIX C: Pass capping flag
-            )
+            # CRITICAL: DO NOT write to dataset here!
+            # Scheduler already wrote this prediction at 1Hz for autoregressive training.
+            # See comment above for rationale.
+            logger.debug(f"[API_SERVE] Serving prediction: offset={cpu_correction.offset_correction*1000:.2f}ms, "
+                        f"capped={was_capped}, source={cpu_correction.source}")
 
             return cpu_correction
 
@@ -1865,21 +1944,74 @@ class RealDataPipeline:
                         f"within {cap_multiplier}x bound: {prediction_magnitude*1000:.1f}ms <= {cap*1000:.1f}ms")
             return correction, False  # FIX C: No capping
 
+    def log_dataset_health(self):
+        """
+        Log dataset health metrics to verify 1Hz autoregressive training.
+
+        This helps detect issues like:
+        - Sparse dataset (not 1Hz)
+        - API calls overwriting scheduler predictions
+        - Missing autoregressive feedback
+        """
+        try:
+            # Get dataset info
+            dataset_size = len(self.dataset_manager.measurement_dataset)
+
+            if dataset_size == 0:
+                logger.warning("[DATASET_HEALTH] Dataset is EMPTY - no training data available!")
+                return
+
+            # Get timestamp range
+            timestamps = sorted(self.dataset_manager.measurement_dataset.keys())
+            oldest_ts = timestamps[0]
+            newest_ts = timestamps[-1]
+            time_span = newest_ts - oldest_ts
+
+            # Calculate expected vs actual samples at 1Hz
+            expected_samples = int(time_span) + 1 if time_span > 0 else 1
+            coverage_pct = (dataset_size / expected_samples * 100) if expected_samples > 0 else 0
+
+            # Count sources
+            ntp_count = sum(1 for ts in timestamps
+                           if self.dataset_manager.measurement_dataset[ts].get('source') == 'ntp_measurement')
+            pred_count = dataset_size - ntp_count
+
+            # Log health metrics
+            logger.info(f"[DATASET_HEALTH] ===== Dataset Health Check =====")
+            logger.info(f"[DATASET_HEALTH] Total samples: {dataset_size}")
+            logger.info(f"[DATASET_HEALTH] Time span: {time_span:.0f}s ({time_span/60:.1f}min)")
+            logger.info(f"[DATASET_HEALTH] Timestamp range: [{oldest_ts:.0f}, {newest_ts:.0f}]")
+            logger.info(f"[DATASET_HEALTH] Expected at 1Hz: {expected_samples} samples")
+            logger.info(f"[DATASET_HEALTH] Coverage: {coverage_pct:.1f}% (should be ~100% for 1Hz)")
+            logger.info(f"[DATASET_HEALTH] Sources: {ntp_count} NTP, {pred_count} predictions")
+            logger.info(f"[DATASET_HEALTH] Scheduler writes: {self.stats.get('dataset_writes_from_scheduler', 0)}")
+            logger.info(f"[DATASET_HEALTH] API writes: {self.stats.get('dataset_writes_from_api', 0)} (should be 0)")
+
+            if coverage_pct < 90:
+                logger.warning(f"[DATASET_HEALTH] ⚠️ LOW COVERAGE: {coverage_pct:.1f}% < 90% - autoregressive training degraded!")
+            elif coverage_pct > 110:
+                logger.warning(f"[DATASET_HEALTH] ⚠️ OVER-COVERAGE: {coverage_pct:.1f}% > 110% - possible duplicate writes!")
+            else:
+                logger.info(f"[DATASET_HEALTH] ✅ Healthy 1Hz coverage for autoregressive training")
+
+        except Exception as e:
+            logger.error(f"[DATASET_HEALTH] Error checking dataset health: {e}")
+
     def get_stats(self) -> dict:
         """Get pipeline statistics"""
         with self.lock:
             pipeline_stats = self.stats.copy()
-        
+
         # Add component statistics
         if self.predictive_scheduler:
             pipeline_stats.update(self.predictive_scheduler.get_stats())
-        
+
         if self.ntp_collector:
             pipeline_stats.update(self.ntp_collector.ntp_client.get_measurement_statistics())
-        
+
         if self.system_metrics:
             pipeline_stats.update(self.system_metrics.get_metrics_summary())
-        
+
         return pipeline_stats
 
 
