@@ -369,15 +369,11 @@ class ChronoTickDaemon:
 
             # Initialize pipeline with models
             logger.info("Connecting ML models to pipeline...")
+            # NOTE: initialize() calls set_model_interfaces() internally with pipeline=self
             real_data_pipeline.initialize(cpu_model=cpu_wrapper, gpu_model=gpu_wrapper)
 
-            # Set model interfaces on predictive scheduler
-            logger.info("Setting up predictive scheduler...")
-            real_data_pipeline.predictive_scheduler.set_model_interfaces(
-                cpu_model=cpu_wrapper,
-                gpu_model=gpu_wrapper,
-                fusion_engine=real_data_pipeline.fusion_engine
-            )
+            # Predictive scheduler already configured by initialize()
+            logger.info("Predictive scheduler configured by pipeline initialization")
             
             # State management
             offset_history = []
@@ -589,15 +585,11 @@ class ChronoTickDaemon:
 
             # STEP 4: Initialize pipeline with models
             logger.info("Connecting ML models to pipeline...")
+            # NOTE: initialize() calls set_model_interfaces() internally with pipeline=self
             real_data_pipeline.initialize(cpu_model=cpu_wrapper, gpu_model=gpu_wrapper)
 
-            # STEP 5: Set model interfaces on predictive scheduler
-            logger.info("Setting up predictive scheduler...")
-            real_data_pipeline.predictive_scheduler.set_model_interfaces(
-                cpu_model=cpu_wrapper,
-                gpu_model=gpu_wrapper,
-                fusion_engine=real_data_pipeline.fusion_engine
-            )
+            # STEP 5: Predictive scheduler already configured by initialize()
+            logger.info("Predictive scheduler configured by pipeline initialization")
 
             logger.info("✓ Full ChronoTick integration complete!")
             logger.info("  - Real NTP measurements: ACTIVE")
