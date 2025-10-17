@@ -1951,11 +1951,12 @@ class RealDataPipeline:
             logger.debug(f"[LAYER 1] No NTP reference yet, skipping capping")
             return correction, False, True
 
-        # Calculate cap RELATIVE to NTP baseline (not absolute)
+        # Calculate cap RELATIVE to NTP baseline
         last_ntp_magnitude = abs(self.last_ntp_offset)
         cap = last_ntp_magnitude * self.max_multiplier
         cap = max(cap, self.absolute_min)  # At least min_cap to prevent near-zero predictions
-        # NO absolute_max ceiling here! Let cap follow NTP baseline for unsynchronized clocks
+        # CRITICAL FIX: Apply absolute_max ceiling to prevent runaway predictions
+        cap = min(cap, self.absolute_max)  # Hard 300ms limit (prevents catastrophic feedback loop)
 
         prediction_magnitude = abs(correction.offset_correction)
 
