@@ -793,22 +793,26 @@ class DatasetManager:
         """
         Backtracking Learning Correction: REPLACE predictions with interpolated NTP ground truth.
 
+        CRITICAL FIX: Corrects FULL CONTEXT WINDOW (512s), not just NTP interval (180s).
+        This ensures model trains on corrected data, not contaminated predictions.
+
         Key Innovation: Make the dataset look like "what NTP would have measured" at each point.
 
-        This method REPLACES all predictions between NTP measurements with linearly
-        interpolated values based on the two NTP boundaries. This gives the ML model
+        This method REPLACES all predictions in the context window with linearly
+        interpolated values based on NTP boundaries. This gives the ML model
         an NTP-aligned dataset to learn from for future predictions.
 
         Example:
+        - Context window: 512s
         - NTP measurement at t=0: offset=10ms
-        - NTP measurement at t=5: offset=20ms
-        - ML predicted at t=[1,2,3,4]: [11,12,13,14]ms
-        - After correction: REPLACE with [12,14,16,18]ms (linear interpolation)
+        - NTP measurement at t=180: offset=20ms
+        - ML predicted at t=[1...511]: various values
+        - After correction: REPLACE all with linear interpolation 10ms → 20ms
 
         Philosophy:
         - STRONGER correction (not weaker) for better NTP alignment
         - Dataset becomes "NTP-like" so future predictions stay aligned
-        - Combined with enhanced NTP (better accuracy) = winning algorithm
+        - Covers FULL context window so model sees corrected data
 
         Args:
             start_time: Start of interval (last NTP measurement timestamp)
@@ -816,22 +820,39 @@ class DatasetManager:
             error: Measured error at end_time (NTP_truth - Prediction)
             interval_duration: Duration of interval in seconds
         """
-        logger.info(f"[BACKTRACKING] Starting backtracking learning correction")
-        logger.info(f"[BACKTRACKING] Error: {error*1000:.2f}ms over {interval_duration:.0f}s")
+        # CRITICAL: Get context window size from config
+        context_window_size = 512  # TimesFM default context length
+
+        # FIX: Expand correction window to cover full context
+        # OLD: Only correct between last NTP and current NTP (180s)
+        # NEW: Correct full context window before current NTP (512s)
+        correction_start = max(start_time, end_time - context_window_size)
+        correction_end = end_time
+        correction_duration = correction_end - correction_start
+
+        logger.info(f"[BACKTRACKING] Starting backtracking learning correction (CONTEXT WINDOW FIX)")
+        logger.info(f"[BACKTRACKING] Error: {error*1000:.2f}ms over NTP interval: {interval_duration:.0f}s")
+        logger.info(f"[BACKTRACKING] CONTEXT WINDOW COVERAGE:")
+        logger.info(f"  Context size: {context_window_size}s")
+        logger.info(f"  NTP interval: [{start_time:.0f}, {end_time:.0f}] = {interval_duration:.0f}s")
+        logger.info(f"  Correction window: [{correction_start:.0f}, {correction_end:.0f}] = {correction_duration:.0f}s")
+        logger.info(f"  Expected samples: ~{int(correction_duration)}")
         logger.info(f"[BACKTRACKING] Strategy: REPLACE predictions with interpolated NTP")
 
-        # Get the NTP offset at the start of the interval
-        # This is the last NTP measurement that was added
-        start_ntp_offset = None
-        if int(start_time) in self.measurement_dataset:
-            start_ntp_offset = self.measurement_dataset[int(start_time)]['offset']
-        else:
-            logger.warning(f"[BACKTRACKING] No measurement at start_time {start_time:.0f}, skipping correction")
-            return
+        # CRITICAL FIX: Find NTP measurement BEFORE correction window starts
+        # We need to interpolate from the NTP before correction_start to the NTP at end_time
+        ntp_before_offset = None
+        ntp_before_time = None
 
-        # Calculate the NTP offset at the end (current NTP measurement)
-        # end_ntp_offset = start_ntp_offset + error
-        # But we need to get the PREDICTION at end_time first
+        # Search for the most recent NTP measurement before correction_start
+        for ts in sorted(self.measurement_dataset.keys()):
+            if ts < correction_start:
+                data = self.measurement_dataset[ts]
+                if data['source'] == 'ntp_measurement':
+                    ntp_before_offset = data['offset']
+                    ntp_before_time = ts
+
+        # Get the PREDICTION at end_time to calculate the new NTP offset
         end_prediction_offset = None
         if int(end_time) in self.measurement_dataset:
             end_prediction_offset = self.measurement_dataset[int(end_time)]['offset']
@@ -847,12 +868,21 @@ class DatasetManager:
             logger.warning(f"[BACKTRACKING] No prediction near end_time {end_time:.0f}, skipping correction")
             return
 
-        # The new NTP measurement is: end_ntp_offset = end_prediction_offset + error
-        end_ntp_offset = end_prediction_offset + error
+        # Calculate the NTP offset at end_time: NTP_truth = Prediction + error
+        ntp_after_offset = end_prediction_offset + error
+        ntp_after_time = end_time
 
-        logger.info(f"[BACKTRACKING] NTP boundaries: start={start_ntp_offset*1000:.2f}ms @ t={start_time:.0f}, "
-                   f"end={end_ntp_offset*1000:.2f}ms @ t={end_time:.0f}")
-        logger.info(f"[BACKTRACKING] Interpolating between these values for all predictions in interval")
+        # Handle first NTP case (no previous NTP before correction window)
+        if ntp_before_offset is None:
+            logger.info(f"[BACKTRACKING] First NTP or no NTP before correction window - using current NTP for whole window")
+            ntp_before_offset = ntp_after_offset
+            ntp_before_time = correction_start
+
+        logger.info(f"[BACKTRACKING] NTP BOUNDARIES FOR INTERPOLATION:")
+        logger.info(f"  Before: {ntp_before_offset*1000:.2f}ms @ t={ntp_before_time:.0f}")
+        logger.info(f"  After: {ntp_after_offset*1000:.2f}ms @ t={ntp_after_time:.0f}")
+        logger.info(f"  Interpolating across: {ntp_after_time - ntp_before_time:.0f}s")
+        logger.info(f"[BACKTRACKING] Replacing ALL predictions in context window with NTP-interpolated values")
 
         # Collect all replacements for detailed logging
         replacements = []  # List of (timestamp, old_value, new_value, delta)
@@ -868,7 +898,9 @@ class DatasetManager:
         sum_after = 0.0
         sum_delta = 0.0
 
-        for timestamp in range(int(start_time) + 1, int(end_time)):
+        # CRITICAL FIX: Loop from correction_start to end_time (full context window)
+        # NOT from start_time to end_time (just NTP interval)
+        for timestamp in range(int(correction_start), int(correction_end)):
             if timestamp in self.measurement_dataset:
                 # FIX C: Skip backtracking for capped predictions (prevents toxic feedback loop)
                 was_capped = self.measurement_dataset[timestamp].get('was_capped', False)
@@ -877,11 +909,15 @@ class DatasetManager:
                     logger.debug(f"[BACKTRACKING] Skipping capped prediction at t={timestamp} (FIX C)")
                     continue  # Skip this prediction - don't apply backtracking to capped values
 
-                # Calculate interpolation weight
-                alpha = (timestamp - start_time) / interval_duration if interval_duration > 0 else 0
+                # Calculate interpolation weight using NTP boundaries
+                total_duration = ntp_after_time - ntp_before_time
+                if total_duration > 0:
+                    alpha = (timestamp - ntp_before_time) / total_duration
+                else:
+                    alpha = 0
 
                 # Calculate what NTP "would have measured" at this point
-                ntp_interpolated = start_ntp_offset + alpha * (end_ntp_offset - start_ntp_offset)
+                ntp_interpolated = ntp_before_offset + alpha * (ntp_after_offset - ntp_before_offset)
 
                 # Get current prediction
                 current_offset = self.measurement_dataset[timestamp]['offset']
@@ -941,13 +977,32 @@ class DatasetManager:
 
             logger.info(f"[BACKTRACKING] ═══════════════════════════════════════════")
 
-        logger.info(f"[BACKTRACKING] REPLACED {correction_count} predictions with NTP-interpolated values")
+        # CRITICAL: Log context window coverage metrics
+        context_coverage_pct = (correction_count / context_window_size * 100) if context_window_size > 0 else 0
+
+        logger.info(f"[BACKTRACKING] ═══════════════════════════════════════════")
+        logger.info(f"[BACKTRACKING] ✅ REPLACED {correction_count} predictions with NTP-interpolated values")
         if skipped_capped_count > 0:
-            logger.info(f"[BACKTRACKING] SKIPPED {skipped_capped_count} capped predictions (FIX C: prevents toxic feedback)")
+            logger.info(f"[BACKTRACKING] ⚠️ SKIPPED {skipped_capped_count} capped predictions (FIX C: prevents toxic feedback)")
         if correction_count > 0:
             logger.info(f"[BACKTRACKING] Replacement range: {min_replacement*1000:.2f}ms to {max_replacement*1000:.2f}ms")
+
+        logger.info(f"[BACKTRACKING] CONTEXT WINDOW COVERAGE:")
+        logger.info(f"  Corrected: {correction_count} samples")
+        logger.info(f"  Context size: {context_window_size} samples")
+        logger.info(f"  Coverage: {context_coverage_pct:.1f}%")
+        if context_coverage_pct >= 95:
+            logger.info(f"  Status: ✅ EXCELLENT (≥95% coverage)")
+        elif context_coverage_pct >= 80:
+            logger.info(f"  Status: ✅ GOOD (≥80% coverage)")
+        elif context_coverage_pct >= 50:
+            logger.info(f"  Status: ⚠️ PARTIAL (<80% coverage)")
+        else:
+            logger.info(f"  Status: ❌ POOR (<50% coverage - model contamination likely!)")
+
         logger.info(f"[BACKTRACKING] Dataset now looks like 'what NTP would have measured'")
         logger.info(f"[BACKTRACKING] Future predictions will learn from this NTP-aligned dataset")
+        logger.info(f"[BACKTRACKING] ═══════════════════════════════════════════")
 
     def apply_retrospective_correction(self, ntp_measurement: NTPMeasurement,
                                      interval_start: float):

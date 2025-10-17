@@ -14,10 +14,10 @@ clock_measurement:
     timeout_seconds: 2.0
   timing:
     normal_operation:
-      measurement_interval: 180
+      measurement_interval: 120  # 2 minutes (was 180s/3min) - faster learning
     warm_up:
       duration_seconds: 60
-      measurement_interval: 5
+      measurement_interval: 1  # 1 second (was 5s) - more aggressive warmup
 covariates:
   enabled: false
   future_variables: []
@@ -80,7 +80,7 @@ prediction_scheduling:
     # Fix: Cap at 2.5x last NTP with hard 300ms max
     max_multiplier: 2.5        # Cap to 2.5x last NTP magnitude (replaces drift calculation)
     absolute_max: 0.300        # Hard maximum: 300ms (prevent all catastrophic predictions)
-    absolute_min: 0.005        # Minimum cap: 5ms (lower bound to allow learning)
+    absolute_min: 0.001        # Minimum cap: 1ms (was 5ms) - allow convergence to ±3ms NTP truth
   sanity_check:
     # LAYER 2: Sanity Check Filter (catch anything that slips through capping)
     enabled: true
