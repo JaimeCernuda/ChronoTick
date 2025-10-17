@@ -53,7 +53,8 @@ class TSFMModelWrapper:
                  inference_engine,
                  model_type: str,  # 'short_term' or 'long_term'
                  dataset_manager,
-                 system_metrics_collector=None):
+                 system_metrics_collector=None,
+                 enable_multivariate=False):  # Phase 3C: Multivariate predictions (disabled by default for now)
         """
         Initialize TSFM model wrapper.
 
@@ -62,14 +63,18 @@ class TSFMModelWrapper:
             model_type: 'short_term' or 'long_term'
             dataset_manager: DatasetManager for historical data
             system_metrics_collector: Optional SystemMetricsCollector for covariates
+            enable_multivariate: If True, predict both offset and drift (Phase 3C)
         """
         self.engine = inference_engine
         self.model_type = model_type
         self.dataset_manager = dataset_manager
         self.system_metrics = system_metrics_collector
+        self.enable_multivariate = enable_multivariate  # Phase 3C
 
         # Track normalization bias for denormalization
         self.normalization_bias = None
+        # Phase 3C: Track current drift estimate
+        self.current_drift = 0.0
 
         # Determine which prediction method to use
         if model_type == 'short_term':
@@ -79,7 +84,7 @@ class TSFMModelWrapper:
         else:
             raise ValueError(f"Unknown model_type: {model_type}. Must be 'short_term' or 'long_term'")
 
-        logger.info(f"Initialized TSFMModelWrapper for {model_type} model")
+        logger.info(f"Initialized TSFMModelWrapper for {model_type} model (multivariate={enable_multivariate})")
 
     def predict_with_uncertainty(self, horizon: int) -> List[PredictionWithUncertainty]:
         """
@@ -139,32 +144,70 @@ class TSFMModelWrapper:
         """
         Get historical offset data from dataset manager with normalization.
 
+        Phase 3C: Now optionally retrieves drift data for multivariate predictions.
+
         Returns:
-            Array of historical offsets (normalized), or None if insufficient data
+            Array of historical data (offsets only or offsets+drifts), or None if insufficient data
         """
-        logger.debug(f"_get_offset_history called")
+        logger.debug(f"_get_offset_history called (multivariate={self.enable_multivariate})")
         try:
-            # Get ALL measurements (NTP + predictions) - no time window
-            # Enable normalization to train on residuals from NTP baseline
-            recent_measurements, normalization_bias = self.dataset_manager.get_recent_measurements(
-                window_seconds=None,
-                normalize=True
-            )
+            if self.enable_multivariate:
+                # Phase 3C: Get measurements with drift for multivariate input
+                recent_measurements, normalization_bias, current_drift = \
+                    self.dataset_manager.get_recent_measurements_with_drift(
+                        window_seconds=None,
+                        normalize=True
+                    )
 
-            if not recent_measurements:
-                logger.warning("No recent measurements available from dataset manager")
-                return None
+                if not recent_measurements:
+                    logger.warning("No recent measurements available from dataset manager")
+                    return None
 
-            # Store normalization bias for denormalization later
-            self.normalization_bias = normalization_bias
-            if normalization_bias is not None:
-                logger.info(f"[NORMALIZATION] Model will train on residuals (baseline: {normalization_bias*1000:.3f}ms)")
+                # Store normalization bias and current drift
+                self.normalization_bias = normalization_bias
+                self.current_drift = current_drift
 
-            # Extract offsets (measurements are tuples of (timestamp, offset))
-            offsets = np.array([offset for timestamp, offset in recent_measurements])
+                if normalization_bias is not None:
+                    logger.info(f"[NORMALIZATION] Multivariate model training on residuals "
+                               f"(baseline: {normalization_bias*1000:.3f}ms, drift: {current_drift:.3f}μs/s)")
 
-            logger.debug(f"Retrieved {len(offsets)} historical offsets (normalized)")
-            return offsets
+                # Extract offsets and drifts (measurements are tuples of (timestamp, offset, drift))
+                offsets = np.array([offset for timestamp, offset, drift in recent_measurements])
+                drifts_us_per_s = np.array([drift for timestamp, offset, drift in recent_measurements])
+
+                # Convert drift from μs/s to s/s for consistency with offset units
+                drifts_s_per_s = drifts_us_per_s * 1e-6
+
+                # Stack as multivariate input: shape (2, sequence_length)
+                # Row 0: offsets, Row 1: drift rates
+                multivariate_history = np.stack([offsets, drifts_s_per_s], axis=0)
+
+                logger.debug(f"Retrieved {len(offsets)} measurements with drift for multivariate input")
+                logger.debug(f"Multivariate shape: {multivariate_history.shape} (2 variables × {len(offsets)} timesteps)")
+
+                return multivariate_history
+
+            else:
+                # Original univariate approach
+                recent_measurements, normalization_bias = self.dataset_manager.get_recent_measurements(
+                    window_seconds=None,
+                    normalize=True
+                )
+
+                if not recent_measurements:
+                    logger.warning("No recent measurements available from dataset manager")
+                    return None
+
+                # Store normalization bias for denormalization later
+                self.normalization_bias = normalization_bias
+                if normalization_bias is not None:
+                    logger.info(f"[NORMALIZATION] Model will train on residuals (baseline: {normalization_bias*1000:.3f}ms)")
+
+                # Extract offsets (measurements are tuples of (timestamp, offset))
+                offsets = np.array([offset for timestamp, offset in recent_measurements])
+
+                logger.debug(f"Retrieved {len(offsets)} historical offsets (normalized)")
+                return offsets
 
         except Exception as e:
             logger.error(f"Failed to get offset history: {e}")
@@ -241,15 +284,15 @@ class TSFMModelWrapper:
             else:
                 offset = offset_residual
 
-            # Calculate drift rate (approximate from consecutive predictions)
-            if i < num_predictions - 1:
+            # Phase 3D: Use calculated drift rate from NTP measurements
+            # Convert from μs/s to s/s for consistency
+            drift = self.current_drift * 1e-6  # Convert μs/s → s/s
+
+            # Fallback: approximate from consecutive predictions if no drift available
+            if drift == 0.0 and i < num_predictions - 1:
                 drift = float(prediction_result.predictions[i + 1] - prediction_result.predictions[i])
-            else:
-                # For last prediction, use previous drift
-                if i > 0:
-                    drift = float(prediction_result.predictions[i] - prediction_result.predictions[i - 1])
-                else:
-                    drift = 0.0
+            elif drift == 0.0 and i > 0:
+                drift = float(prediction_result.predictions[i] - prediction_result.predictions[i - 1])
 
             # Get uncertainty
             if prediction_result.uncertainty is not None and i < len(prediction_result.uncertainty):
