@@ -150,6 +150,7 @@ class PredictiveScheduler:
         self.cpu_model = None
         self.gpu_model = None
         self.fusion_engine = None
+        self.dataset_manager = None  # NEW: For autoregressive feedback at 1Hz
         
         # Statistics
         self.stats = {
@@ -176,11 +177,12 @@ class PredictiveScheduler:
             logger.error(f"Failed to load config {config_path}: {e}")
             raise
     
-    def set_model_interfaces(self, cpu_model, gpu_model, fusion_engine):
+    def set_model_interfaces(self, cpu_model, gpu_model, fusion_engine, dataset_manager=None):
         """Inject model interfaces for making predictions"""
         self.cpu_model = cpu_model
         self.gpu_model = gpu_model
         self.fusion_engine = fusion_engine
+        self.dataset_manager = dataset_manager  # NEW: For autoregressive feedback
     
     def start_scheduler(self):
         """Start the predictive scheduler thread"""
@@ -302,7 +304,8 @@ class PredictiveScheduler:
             cpu_prediction = self.cpu_model.predict_with_uncertainty(horizon=horizon)
             logger.info(f"[SCHEDULER_TASK] CPU model returned {len(cpu_prediction) if cpu_prediction else 0} predictions")
 
-            # Cache prediction for each time step
+            # Cache prediction for each time step AND write to dataset for autoregressive feedback
+            dataset_writes = 0
             for i, pred in enumerate(cpu_prediction):
                 timestamp = start_time + i
 
@@ -318,7 +321,26 @@ class PredictiveScheduler:
                     quantiles=pred.quantiles  # Pass quantiles from prediction
                 )
 
+                # Cache for API serving
                 self._cache_prediction(timestamp, correction)
+
+                # CRITICAL FIX: Write to dataset for autoregressive training at 1Hz
+                # This ensures model trains on recent predictions, not just NTP
+                if self.dataset_manager:
+                    self.dataset_manager.add_prediction(
+                        timestamp=timestamp,
+                        offset=pred.offset,
+                        drift=pred.drift,
+                        source="cpu",
+                        uncertainty=pred.offset_uncertainty,
+                        confidence=pred.confidence,
+                        was_capped=False  # Scheduler predictions are pre-sanity-check
+                    )
+                    dataset_writes += 1
+
+            logger.info(f"[SCHEDULER_DATASET] Wrote {dataset_writes}/{len(cpu_prediction)} predictions to dataset at 1Hz")
+            logger.info(f"[SCHEDULER_DATASET] Timestamp range: [{start_time:.0f}, {end_time-1:.0f}]")
+            logger.info(f"[SCHEDULER_DATASET] This provides autoregressive training data for next model run")
 
             # Update stats
             with self.lock:
@@ -349,7 +371,7 @@ class PredictiveScheduler:
                 horizon=int(end_time - start_time)
             )
 
-            # Cache prediction for each time step
+            # Cache prediction for each time step AND write to dataset for autoregressive feedback
             for i, pred in enumerate(gpu_prediction):
                 timestamp = start_time + i
 
@@ -365,7 +387,21 @@ class PredictiveScheduler:
                     quantiles=pred.quantiles  # Pass quantiles from prediction
                 )
 
+                # Cache for API serving
                 self._cache_prediction(timestamp, correction)
+
+                # CRITICAL FIX: Write to dataset for autoregressive training at 1Hz
+                # This ensures model trains on recent predictions, not just NTP
+                if self.dataset_manager:
+                    self.dataset_manager.add_prediction(
+                        timestamp=timestamp,
+                        offset=pred.offset,
+                        drift=pred.drift,
+                        source="gpu",
+                        uncertainty=pred.offset_uncertainty,
+                        confidence=pred.confidence,
+                        was_capped=False  # Scheduler predictions are pre-sanity-check
+                    )
 
             # Update stats
             with self.lock:
