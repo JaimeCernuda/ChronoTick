@@ -90,7 +90,7 @@ prediction_scheduling:
     #   → Valid range: [1ms, 30ms]
     # This adapts to system characteristics (WSL2 vs normal clocks)
     enabled: true
-    adaptive_range_multiplier: 10.0  # Predictions within avg_error ± (10 × avg_error)
+    adaptive_range_multiplier: 4.0   # Predictions within avg_error ± (4 × avg_error) = 5×avg (matches old relative_limit)
     absolute_min_bound: 0.001         # Never allow predictions < 1ms (enforce sanity floor)
     absolute_max_bound: 10.0          # Never allow predictions > 10s (catastrophic failures)
     relative_limit: 5.0               # Fallback: Reject if > 5x average NTP magnitude
