@@ -358,32 +358,98 @@ class DatasetManager:
 
         return drift_rate
 
+    def calculate_drift_rate_windowed(self, window_size: int = 10) -> float:
+        """
+        Calculate clock drift rate using window-based linear regression.
+
+        Phase 3B: Improved drift calculation that reduces noise sensitivity
+        by fitting a linear trend across multiple measurements.
+
+        Args:
+            window_size: Number of recent measurements to use (default: 10)
+
+        Returns:
+            drift_rate in μs/s, or 0.0 if insufficient data
+        """
+        with self.lock:
+            # Need at least window_size measurements for reliable regression
+            if len(self.measurement_dataset) < window_size:
+                return 0.0
+
+            # Get most recent measurements (sorted by timestamp)
+            sorted_keys = sorted(self.measurement_dataset.keys())[-window_size:]
+            recent_measurements = [self.measurement_dataset[k] for k in sorted_keys]
+
+            # Extract timestamps and offsets
+            timestamps = np.array([m['timestamp'] for m in recent_measurements])
+            offsets = np.array([m['offset'] for m in recent_measurements])
+
+            # Perform linear regression: offset = drift_rate * time + baseline
+            try:
+                coeffs = np.polyfit(timestamps, offsets, deg=1)
+                slope = coeffs[0]  # drift rate in seconds/second
+
+                # Convert to μs/s
+                drift_rate_us_per_s = slope * 1e6
+
+                # Calculate R² for quality assessment
+                offsets_predicted = slope * timestamps + coeffs[1]
+                residuals = offsets - offsets_predicted
+                ss_res = np.sum(residuals**2)
+                ss_tot = np.sum((offsets - np.mean(offsets))**2)
+                r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
+
+                time_span = timestamps[-1] - timestamps[0]
+                offset_span = (offsets[-1] - offsets[0]) * 1e6
+                noise_std = np.std(residuals) * 1e6
+
+                logger.info(f"[DRIFT_WINDOWED] window={window_size}, span={time_span:.1f}s, "
+                           f"Δoffset={offset_span:.0f}μs, drift={drift_rate_us_per_s:+.3f}μs/s, "
+                           f"R²={r_squared:.4f}, noise={noise_std:.0f}μs")
+
+                return drift_rate_us_per_s
+
+            except (np.linalg.LinAlgError, Exception) as e:
+                logger.error(f"[DRIFT_WINDOWED] Regression failed: {e}")
+                return 0.0
+
     def add_ntp_measurement(self, measurement: NTPMeasurement):
         """Add real NTP measurement to dataset
 
-        Phase 3A: Now calculates and stores drift rate if previous measurement exists.
+        Phase 3B: Uses window-based drift calculation for better noise immunity.
         """
         with self.lock:
-            # Phase 3A: Calculate drift rate from previous measurement
+            # First store the measurement
+            self.measurement_dataset[int(measurement.timestamp)] = {
+                'timestamp': measurement.timestamp,
+                'offset': measurement.offset,
+                'drift': 0.0,  # Will update after calculating
+                'source': 'ntp_measurement',
+                'uncertainty': measurement.uncertainty,
+                'corrected': False
+            }
+
+            # Phase 3B: Calculate drift using windowed regression
             calculated_drift = 0.0
-            if self.previous_ntp_measurement is not None:
-                calculated_drift = self.calculate_drift_rate(
-                    self.previous_ntp_measurement,
-                    measurement
-                )
+            window_size = 10
+
+            if len(self.measurement_dataset) >= window_size:
+                # Use windowed regression (Phase 3B - improved)
+                calculated_drift = self.calculate_drift_rate_windowed(window_size)
+
                 # Store drift rate history
                 self.drift_rates.append((measurement.timestamp, calculated_drift))
                 self.current_drift_estimate = calculated_drift
                 self.drift_calculation_count += 1
                 self.drift_rate_history.append(calculated_drift)
 
-                # Keep drift history manageable (last 100 measurements)
+                # Keep drift history manageable
                 if len(self.drift_rates) > 100:
                     self.drift_rates = self.drift_rates[-50:]
                 if len(self.drift_rate_history) > 100:
                     self.drift_rate_history = self.drift_rate_history[-50:]
 
-                # Periodic Phase 3 statistics (every 10 drift calculations)
+                # Periodic Phase 3 statistics
                 if self.drift_calculation_count % 10 == 0:
                     drift_array = np.array(self.drift_rate_history)
                     logger.info(f"[PHASE3_STATS] Drift Rate Summary after {self.drift_calculation_count} calculations:")
@@ -391,17 +457,18 @@ class DatasetManager:
                                f"Std: {np.std(drift_array):.3f}μs/s")
                     logger.info(f"  Range: [{np.min(drift_array):+.3f}, {np.max(drift_array):+.3f}]μs/s")
                     logger.info(f"  Current: {calculated_drift:+.3f}μs/s")
-                    logger.info(f"  → Phase 3 Impact: Tracking clock drift for predictive corrections")
+                    logger.info(f"  → Phase 3B: Window-based drift calculation active")
+            else:
+                # During initial warmup, use simple consecutive method as fallback
+                if self.previous_ntp_measurement is not None:
+                    calculated_drift = self.calculate_drift_rate(
+                        self.previous_ntp_measurement,
+                        measurement
+                    )
+                    self.current_drift_estimate = calculated_drift
 
-            # Store measurement with calculated drift
-            self.measurement_dataset[int(measurement.timestamp)] = {
-                'timestamp': measurement.timestamp,
-                'offset': measurement.offset,
-                'drift': calculated_drift,  # Phase 3A: Now using calculated drift
-                'source': 'ntp_measurement',
-                'uncertainty': measurement.uncertainty,
-                'corrected': False
-            }
+            # Update the stored measurement with calculated drift
+            self.measurement_dataset[int(measurement.timestamp)]['drift'] = calculated_drift
 
             # Update previous measurement tracker
             self.previous_ntp_measurement = measurement
