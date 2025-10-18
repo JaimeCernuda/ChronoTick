@@ -31,9 +31,9 @@ print(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 print()
 
 # Configuration
-TEST_DURATION_MINUTES = 10  # 10 minutes for quick validation
+TEST_DURATION_MINUTES = 480  # 8 hours overnight test
 SAMPLE_INTERVAL_SECONDS = 10  # Sample every 10 seconds
-NTP_INTERVAL_SECONDS = 60  # NTP every 1 minute (faster validation)
+NTP_INTERVAL_SECONDS = 120  # NTP every 2 minutes (reduce network load for long test)
 NTP_SERVER = "time.google.com"
 TIMESTAMP = datetime.now().strftime('%Y%m%d_%H%M%S')
 CSV_PATH = f"/tmp/chronotick_client_validation_{TIMESTAMP}.csv"
