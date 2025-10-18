@@ -1056,22 +1056,38 @@ class DatasetManager:
         logger.info(f"  Drift rate: {(ntp_after_offset - ntp_before_offset)/(ntp_after_time - ntp_before_time)*1e6:.2f}μs/s")
         logger.info(f"[BACKTRACKING] Replacing ALL predictions in context window with NTP-interpolated values")
 
-        # CRITICAL DEBUG: Show what predictions exist in dataset before correction
-        pred_count_before_corr = 0
-        pred_range_before = []
-        for ts in sorted(self.measurement_dataset.keys()):
-            if self.measurement_dataset[ts]['source'].startswith('prediction_'):
-                pred_count_before_corr += 1
-                if len(pred_range_before) < 5 or ts > int(correction_end):
-                    pred_range_before.append((ts, self.measurement_dataset[ts]['offset']*1000))
-        logger.info(f"[BACKTRACKING] Dataset has {pred_count_before_corr} predictions before correction")
-        logger.info(f"[BACKTRACKING] Sample predictions: {pred_range_before[:10]}")
+        # DETAILED DIAGNOSTIC: Show EXACTLY what's in the dataset and what will be corrected
+        all_timestamps = sorted(self.measurement_dataset.keys())
+        pred_in_dataset = [ts for ts in all_timestamps if self.measurement_dataset[ts]['source'].startswith('prediction_')]
+        pred_in_window = [ts for ts in pred_in_dataset if int(correction_start) <= ts <= int(correction_end)]
+
+        logger.info(f"[BACKTRACKING] ═══ DATASET DIAGNOSTIC ═══")
+        logger.info(f"[BACKTRACKING] RUNNING CORRECTION:")
+        logger.info(f"  INPUT: Correction window [{int(correction_start)}, {int(correction_end)}] = {int(correction_end - correction_start)}s")
+        logger.info(f"  INPUT: Expected ~{int(correction_end - correction_start)} predictions at 1Hz")
+        logger.info(f"")
+        logger.info(f"[BACKTRACKING] GETTING DATA FOR CORRECTION:")
+        logger.info(f"  Total dataset entries: {len(self.measurement_dataset)}")
+        logger.info(f"  Total predictions in dataset: {len(pred_in_dataset)}")
+        if pred_in_dataset:
+            logger.info(f"  Prediction time range: [{pred_in_dataset[0]}, {pred_in_dataset[-1]}] = {pred_in_dataset[-1] - pred_in_dataset[0]}s span")
+            logger.info(f"  Sample prediction timestamps: {pred_in_dataset[:10]}")
+        logger.info(f"  Predictions IN correction window [{int(correction_start)}, {int(correction_end)}]: {len(pred_in_window)}")
+        if pred_in_window:
+            logger.info(f"  Window predictions time range: [{pred_in_window[0]}, {pred_in_window[-1]}]")
+            logger.info(f"  Window predictions sample: {pred_in_window[:20]}")
+        logger.info(f"")
+        logger.info(f"[BACKTRACKING] CORRECTION WILL EXECUTE ON:")
+        logger.info(f"  {len(pred_in_window)} predictions found in correction window")
+        logger.info(f"  Coverage: {len(pred_in_window)}/{int(correction_end - correction_start)} = {len(pred_in_window)*100.0/(correction_end - correction_start):.1f}%")
 
         # Collect all replacements for detailed logging
         replacements = []  # List of (timestamp, old_value, new_value, delta)
 
         # FIX C: Count skipped capped predictions
         skipped_capped_count = 0
+        skipped_not_in_dataset = 0
+        skipped_not_prediction = 0
 
         # REPLACE all predictions with linearly interpolated NTP values
         correction_count = 0
@@ -1084,6 +1100,14 @@ class DatasetManager:
         # CRITICAL FIX: Loop from correction_start to end_time (full context window)
         # NOT from start_time to end_time (just NTP interval)
         for timestamp in range(int(correction_start), int(correction_end)):
+            if timestamp not in self.measurement_dataset:
+                skipped_not_in_dataset += 1
+                continue
+
+            if not self.measurement_dataset[timestamp]['source'].startswith('prediction_'):
+                skipped_not_prediction += 1
+                continue
+
             if timestamp in self.measurement_dataset:
                 # FIX C: Skip backtracking for capped predictions (prevents toxic feedback loop)
                 was_capped = self.measurement_dataset[timestamp].get('was_capped', False)
@@ -1179,11 +1203,17 @@ class DatasetManager:
         context_coverage_pct = (correction_count / context_window_size * 100) if context_window_size > 0 else 0
 
         logger.info(f"[BACKTRACKING] ═══════════════════════════════════════════")
-        logger.info(f"[BACKTRACKING] ✅ REPLACED {correction_count} predictions with NTP-interpolated values")
+        logger.info(f"[BACKTRACKING] CORRECTION EXECUTED - STORING RESULTS:")
+        logger.info(f"  ✅ REPLACED: {correction_count} predictions with NTP-interpolated values")
+        logger.info(f"  ⏭️  SKIPPED (not in dataset): {skipped_not_in_dataset} timestamps")
+        logger.info(f"  ⏭️  SKIPPED (not prediction): {skipped_not_prediction} timestamps")
         if skipped_capped_count > 0:
-            logger.info(f"[BACKTRACKING] ⚠️ SKIPPED {skipped_capped_count} capped predictions (FIX C: prevents toxic feedback)")
+            logger.info(f"  ⚠️  SKIPPED (capped): {skipped_capped_count} capped predictions")
+        logger.info(f"")
+        logger.info(f"  Total timestamps checked: {int(correction_end - correction_start)}")
+        logger.info(f"  Actually corrected: {correction_count} ({correction_count*100.0/(correction_end - correction_start):.1f}%)")
         if correction_count > 0:
-            logger.info(f"[BACKTRACKING] Replacement range: {min_replacement*1000:.2f}ms to {max_replacement*1000:.2f}ms")
+            logger.info(f"  Replacement range: {min_replacement*1000:.2f}ms to {max_replacement*1000:.2f}ms")
 
         logger.info(f"[BACKTRACKING] CONTEXT WINDOW COVERAGE:")
         logger.info(f"  Corrected: {correction_count} samples")
