@@ -17,7 +17,8 @@ import ntplib
 from pathlib import Path
 from datetime import datetime
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Add server/src to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent / "server" / "src"))
 
 from chronotick.inference.engine import ChronoTickInferenceEngine
 from chronotick.inference.real_data_pipeline import RealDataPipeline
@@ -30,11 +31,12 @@ print(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 print()
 
 # Configuration
-TEST_DURATION_MINUTES = 25  # 25 minutes
+TEST_DURATION_MINUTES = 10  # 10 minutes for quick validation
 SAMPLE_INTERVAL_SECONDS = 10  # Sample every 10 seconds
-NTP_INTERVAL_SECONDS = 120  # NTP every 2 minutes
+NTP_INTERVAL_SECONDS = 60  # NTP every 1 minute (faster validation)
 NTP_SERVER = "time.google.com"
-CSV_PATH = "/tmp/chronotick_client_validation.csv"
+TIMESTAMP = datetime.now().strftime('%Y%m%d_%H%M%S')
+CSV_PATH = f"/tmp/chronotick_client_validation_{TIMESTAMP}.csv"
 
 print(f"Configuration:")
 print(f"  Test duration: {TEST_DURATION_MINUTES} minutes")
@@ -45,7 +47,7 @@ print(f"  CSV output: {CSV_PATH}")
 print()
 
 # Initialize ChronoTick system
-config_path = "configs/config_complete.yaml"
+config_path = "configs/config_stable_clock.yaml"
 
 print("Initializing ChronoTick system...")
 engine = ChronoTickInferenceEngine(config_path)
