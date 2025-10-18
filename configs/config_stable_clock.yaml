@@ -107,10 +107,12 @@ prediction_scheduling:
     absolute_max: 0.300        # Hard max: 300ms (prevent catastrophic predictions)
     absolute_min: 0.001        # Minimum cap: 1ms (allow convergence)
   sanity_check:
-    # LAYER 2: Adaptive Sanity Check (learns from system clock behavior)
-    enabled: true
+    # LAYER 2: DISABLED - Let ML predictions through unmodified
+    # Rationale: Sanity check was rejecting valid predictions (< 1ms) on stable clocks
+    # If ML is wrong, we want to see it in validation data and FIX THE ML, not hide it!
+    enabled: false
     adaptive_range_multiplier: 4.0   # Predictions within avg_error ± (4 × avg_error)
-    absolute_min_bound: 0.001         # Never allow predictions < 1ms
+    absolute_min_bound: 0.0           # No lower bound - allow any prediction
     absolute_max_bound: 10.0          # Never allow predictions > 10s
     relative_limit: 5.0               # Fallback: Reject if > 5x average NTP magnitude
     statistical_limit: 3.0            # Fallback: Reject if > 3 sigma from NTP mean
