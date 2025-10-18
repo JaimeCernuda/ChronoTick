@@ -1084,8 +1084,8 @@ class DatasetManager:
         # Collect all replacements for detailed logging
         replacements = []  # List of (timestamp, old_value, new_value, delta)
 
-        # FIX C: Count skipped capped predictions
-        skipped_capped_count = 0
+        # Track capped predictions that get corrected (important for cleaning dataset)
+        corrected_capped_count = 0  # Tracks capped predictions that were corrected
         skipped_not_in_dataset = 0
         skipped_not_prediction = 0
 
@@ -1109,12 +1109,13 @@ class DatasetManager:
                 continue
 
             if timestamp in self.measurement_dataset:
-                # FIX C: Skip backtracking for capped predictions (prevents toxic feedback loop)
+                # Track if this was a capped prediction (for logging/statistics)
                 was_capped = self.measurement_dataset[timestamp].get('was_capped', False)
                 if was_capped:
-                    skipped_capped_count += 1
-                    logger.debug(f"[BACKTRACKING] Skipping capped prediction at t={timestamp} (FIX C)")
-                    continue  # Skip this prediction - don't apply backtracking to capped values
+                    corrected_capped_count += 1
+                    # NOTE: We DO correct capped predictions! They're the ones that NEED correction most.
+                    # Skipping them would leave bad values in the dataset causing feedback loops.
+                    logger.debug(f"[BACKTRACKING] Correcting capped prediction at t={timestamp} (cleaning dataset)")
 
                 # Calculate interpolation weight using NTP boundaries
                 total_duration = ntp_after_time - ntp_before_time
@@ -1207,8 +1208,8 @@ class DatasetManager:
         logger.info(f"  ✅ REPLACED: {correction_count} predictions with NTP-interpolated values")
         logger.info(f"  ⏭️  SKIPPED (not in dataset): {skipped_not_in_dataset} timestamps")
         logger.info(f"  ⏭️  SKIPPED (not prediction): {skipped_not_prediction} timestamps")
-        if skipped_capped_count > 0:
-            logger.info(f"  ⚠️  SKIPPED (capped): {skipped_capped_count} capped predictions")
+        if corrected_capped_count > 0:
+            logger.info(f"  ✅ CORRECTED (capped): {corrected_capped_count} capped predictions cleaned")
         logger.info(f"")
         logger.info(f"  Total timestamps checked: {int(correction_end - correction_start)}")
         logger.info(f"  Actually corrected: {correction_count} ({correction_count*100.0/(correction_end - correction_start):.1f}%)")
