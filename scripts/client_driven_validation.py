@@ -13,7 +13,6 @@ This validates that ChronoTick provides better time accuracy than system clock a
 import sys
 import time
 import csv
-import ntplib
 from pathlib import Path
 from datetime import datetime
 
@@ -23,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "server" / "src"))
 from chronotick.inference.engine import ChronoTickInferenceEngine
 from chronotick.inference.real_data_pipeline import RealDataPipeline
 from chronotick.inference.tsfm_model_wrapper import create_model_wrappers
+from chronotick.inference.ntp_client import NTPClientWithOutlierRejection, NTPConfig
 
 print("=" * 80)
 print("CLIENT-DRIVEN LONG-TERM VALIDATION TEST")
@@ -34,7 +34,6 @@ print()
 TEST_DURATION_MINUTES = 480  # 8 hours overnight test
 SAMPLE_INTERVAL_SECONDS = 10  # Sample every 10 seconds
 NTP_INTERVAL_SECONDS = 120  # NTP every 2 minutes (reduce network load for long test)
-NTP_SERVER = "time.google.com"
 TIMESTAMP = datetime.now().strftime('%Y%m%d_%H%M%S')
 CSV_PATH = f"/tmp/chronotick_client_validation_{TIMESTAMP}.csv"
 
@@ -42,7 +41,7 @@ print(f"Configuration:")
 print(f"  Test duration: {TEST_DURATION_MINUTES} minutes")
 print(f"  Sample interval: {SAMPLE_INTERVAL_SECONDS} seconds")
 print(f"  NTP interval: {NTP_INTERVAL_SECONDS} seconds ({NTP_INTERVAL_SECONDS//60} minutes)")
-print(f"  NTP server: {NTP_SERVER}")
+print(f"  NTP mode: Advanced (multi-server, 3 samples/server, outlier rejection)")
 print(f"  CSV output: {CSV_PATH}")
 print()
 
@@ -88,8 +87,17 @@ print("✓ Warmup complete")
 time.sleep(5)  # Wait for warmup timer
 print()
 
-# Initialize NTP client for ground truth measurements
-ntp_client = ntplib.NTPClient()
+# Initialize advanced NTP client for ground truth measurements
+# Uses multi-server queries, outlier rejection, and 3-sample averaging
+ntp_config = NTPConfig(
+    servers=["time.google.com", "time.cloudflare.com", "time.nist.gov", "pool.ntp.org"],
+    measurement_mode="advanced",  # 3 samples with 100ms spacing
+    outlier_sigma_threshold=3.0,  # 3σ outlier rejection
+    max_acceptable_uncertainty=0.010  # 10ms max uncertainty
+)
+ntp_client = NTPClientWithOutlierRejection(ntp_config)
+print(f"✓ Advanced NTP client initialized (mode: advanced, servers: {len(ntp_config.servers)})")
+print()
 
 # CSV setup
 csv_file = open(CSV_PATH, 'w', newline='')
@@ -160,25 +168,34 @@ try:
 
         if elapsed - last_ntp_time >= NTP_INTERVAL_SECONDS:
             try:
-                # Get NTP response
-                response = ntp_client.request(NTP_SERVER, version=3, timeout=2)
+                # Get best NTP measurement using advanced protocol
+                # - Queries multiple servers (time.google.com, time.cloudflare.com, time.nist.gov, pool.ntp.org)
+                # - Takes 3 samples per server with 100ms spacing
+                # - Uses outlier filtering (3σ threshold)
+                # - Selects best by delay/stratum/uncertainty
+                measurement = ntp_client.get_best_measurement()
 
-                # NTP time is the reference time from the server
-                # tx_time is when server sent the response
-                ntp_time = response.tx_time
+                if measurement:
+                    # NTP time is the reference time from the server
+                    ntp_time = measurement.timestamp
 
-                # Offset is how much our clock differs from NTP
-                # Positive = our clock is ahead, Negative = our clock is behind
-                ntp_offset_ms = response.offset * 1000
-                ntp_uncertainty_ms = response.root_delay * 1000 / 2  # Approximate uncertainty
-                ntp_server_used = NTP_SERVER
-                has_ntp = True
-                last_ntp_time = elapsed
-                ntp_sample_count += 1
+                    # Offset is how much our clock differs from NTP
+                    # Positive = our clock is ahead, Negative = our clock is behind
+                    ntp_offset_ms = measurement.offset * 1000
+                    ntp_uncertainty_ms = measurement.uncertainty * 1000
+                    ntp_server_used = measurement.server
+                    has_ntp = True
+                    last_ntp_time = elapsed
+                    ntp_sample_count += 1
 
-                print(f"[{elapsed:6.1f}s] 📡 NTP: offset={ntp_offset_ms:>8.2f}ms, "
-                      f"ChronoTick: offset={chronotick_offset_ms:>8.2f}ms ± {chronotick_uncertainty_ms:>6.2f}ms, "
-                      f"source={chronotick_source}")
+                    print(f"[{elapsed:6.1f}s] 📡 NTP (advanced): server={measurement.server}, "
+                          f"offset={ntp_offset_ms:>8.2f}ms ± {ntp_uncertainty_ms:>5.2f}ms, "
+                          f"ChronoTick: offset={chronotick_offset_ms:>8.2f}ms ± {chronotick_uncertainty_ms:>6.2f}ms, "
+                          f"source={chronotick_source}")
+                else:
+                    # NTP query succeeded but measurement was rejected by outlier filter
+                    if ntp_sample_count == 0:
+                        print(f"⚠️  NTP measurement rejected by outlier filter at {elapsed:.1f}s")
 
             except Exception as e:
                 # NTP failed, but continue test
