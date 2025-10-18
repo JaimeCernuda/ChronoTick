@@ -1606,7 +1606,7 @@ class RealDataPipeline:
         self.last_ntp_time = 0
         self.last_ntp_offset = None
         self.last_ntp_uncertainty = None
-        self.last_processed_ntp_count = 0  # Track how many NTP measurements we've processed
+        self.last_processed_ntp_timestamp = 0.0  # Track timestamp of last processed NTP measurement
         self.warm_up_complete = False
         self.lock = threading.Lock()
 
@@ -1793,23 +1793,31 @@ class RealDataPipeline:
 
         This is the ONLY place where NTP correction happens - by correcting
         the historical dataset. NO real-time blending!
+
+        FIX: Use timestamp-based tracking instead of count to handle sliding window
         """
-        logger.debug(f"_check_for_ntp_updates called: current_time={current_time}, "
-                    f"last_processed_count={self.last_processed_ntp_count}")
+        logger.info(f"[NTP_CHECK] ═══════════════════════════════════════════")
+        logger.info(f"[NTP_CHECK] Checking for NTP updates at t={current_time:.0f}")
+        logger.info(f"[NTP_CHECK] Last processed NTP timestamp: {self.last_processed_ntp_timestamp:.0f}")
 
         # Get ALL recent measurements from collector (not just the last one!)
         all_measurements = self.ntp_collector.get_recent_measurements(window_seconds=500)
 
-        logger.debug(f"NTP collector has {len(all_measurements)} total measurements, "
-                    f"already processed {self.last_processed_ntp_count}")
+        logger.info(f"[NTP_CHECK] Collector returned {len(all_measurements)} measurements in 500s window")
 
-        # Process any new measurements we haven't seen yet
-        if len(all_measurements) > self.last_processed_ntp_count:
-            new_measurements = all_measurements[self.last_processed_ntp_count:]
-            logger.info(f"Found {len(new_measurements)} new NTP measurements to process")
+        # FIX: Filter by timestamp instead of count (handles sliding window correctly!)
+        new_measurements = [(ts, off, unc) for ts, off, unc in all_measurements
+                           if ts > self.last_processed_ntp_timestamp]
+
+        if new_measurements:
+            logger.info(f"[NTP_CHECK] Found {len(new_measurements)} NEW NTP measurements to process")
+            logger.info(f"[NTP_CHECK] Timestamp range: {new_measurements[0][0]:.0f} → {new_measurements[-1][0]:.0f}")
 
             # Apply dataset correction for each new NTP measurement
-            for timestamp, offset, uncertainty in new_measurements:
+            for idx, (timestamp, offset, uncertainty) in enumerate(new_measurements, 1):
+                logger.info(f"[NTP_CHECK] Processing measurement {idx}/{len(new_measurements)}: "
+                           f"t={timestamp:.0f}, offset={offset*1000:.2f}ms, unc={uncertainty*1000:.2f}ms")
+
                 # Create NTPMeasurement object
                 ntp_measurement = NTPMeasurement(
                     offset=offset,
@@ -1824,6 +1832,9 @@ class RealDataPipeline:
                 # Apply dataset-only correction using configured method
                 # SKIP correction during warmup (no predictions to correct yet)
                 if self.ntp_correction_enabled and self.warm_up_complete:
+                    logger.info(f"[NTP_CHECK] → Applying {self.ntp_correction_method} correction to dataset...")
+                    dataset_size_before = len(self.dataset_manager.get_recent_measurements())
+
                     # Use uncertainties from configuration
                     self.dataset_manager.apply_ntp_correction(
                         ntp_measurement,
@@ -1831,8 +1842,12 @@ class RealDataPipeline:
                         offset_uncertainty=self.ntp_offset_uncertainty,
                         drift_uncertainty=self.ntp_drift_uncertainty
                     )
+
+                    dataset_size_after = len(self.dataset_manager.get_recent_measurements())
+                    logger.info(f"[NTP_CHECK] → Correction complete. Dataset size: {dataset_size_before} → {dataset_size_after}")
                 else:
                     # Just add NTP without correction (warmup or correction disabled)
+                    logger.info(f"[NTP_CHECK] → Adding NTP to dataset (no correction, warmup={not self.warm_up_complete})")
                     self.dataset_manager.add_ntp_measurement(ntp_measurement)
                     if not self.warm_up_complete:
                         logger.debug(f"[NTP_WARMUP] Skipping correction during warmup phase")
@@ -1862,11 +1877,21 @@ class RealDataPipeline:
                     # Update adaptive sanity bounds based on new NTP measurement
                     self._update_adaptive_sanity_bounds()
 
-            # Update count of processed measurements
-            self.last_processed_ntp_count = len(all_measurements)
+            # Update timestamp of last processed measurement (FIX: use timestamp instead of count!)
+            self.last_processed_ntp_timestamp = new_measurements[-1][0]  # Last timestamp processed
 
-            logger.info(f"Dataset now has {len(self.dataset_manager.get_recent_measurements())} measurements")
-            logger.info(f"Latest NTP: t={self.last_ntp_time:.0f}, offset={self.last_ntp_offset*1000:.2f}ms")
+            logger.info(f"[NTP_CHECK] ═══════════════════════════════════════════")
+            logger.info(f"[NTP_CHECK] ✓ Processed {len(new_measurements)} NTP measurements")
+            logger.info(f"[NTP_CHECK] ✓ Updated last_processed_timestamp: {self.last_processed_ntp_timestamp:.0f}")
+            logger.info(f"[NTP_CHECK] ✓ Dataset now has {len(self.dataset_manager.get_recent_measurements())} total measurements")
+            logger.info(f"[NTP_CHECK] ✓ Latest NTP: t={self.last_ntp_time:.0f}, offset={self.last_ntp_offset*1000:.2f}ms")
+            logger.info(f"[NTP_CHECK] ═══════════════════════════════════════════")
+        else:
+            logger.warning(f"[NTP_CHECK] ✗ NO new NTP measurements found!")
+            logger.warning(f"[NTP_CHECK] ✗ Collector window has {len(all_measurements)} measurements")
+            logger.warning(f"[NTP_CHECK] ✗ All timestamps ≤ {self.last_processed_ntp_timestamp:.0f}")
+            logger.warning(f"[NTP_CHECK] ✗ This is THE BUG if it keeps happening!")
+            logger.warning(f"[NTP_CHECK] ═══════════════════════════════════════════")
 
     # Old real-time blending methods removed - now using dataset-only correction
 
