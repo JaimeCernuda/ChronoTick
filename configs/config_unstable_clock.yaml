@@ -81,6 +81,12 @@ prediction_scheduling:
     enabled: true
     method: backtracking
     offset_uncertainty: 0.001
+  drift_calculation:
+    # Phase 3B: Window-based drift calculation
+    # Also works for unstable clocks - provides smoother, more stable drift estimates
+    method: windowed              # "windowed" (Phase 3B) or "consecutive" (Phase 3A)
+    window_size: 10               # Number of measurements for regression (typical: 10-20)
+    min_measurements: 5           # Minimum measurements before calculating drift
   adaptive_capping:
     # CONFIGURATION: UNSTABLE CLOCKS (WSL2, VMs, Virtualized Environments)
     #

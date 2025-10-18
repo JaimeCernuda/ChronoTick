@@ -81,6 +81,12 @@ prediction_scheduling:
     enabled: true
     method: backtracking
     offset_uncertainty: 0.001
+  drift_calculation:
+    # Phase 3B: Window-based drift calculation for stable clocks
+    # Uses linear regression over multiple NTP measurements to reduce noise sensitivity
+    method: windowed              # "windowed" (Phase 3B) or "consecutive" (Phase 3A)
+    window_size: 10               # Number of measurements for regression (typical: 10-20)
+    min_measurements: 5           # Minimum measurements before calculating drift
   adaptive_capping:
     # CONFIGURATION: STABLE CLOCKS (Physical Servers, Homelab, Bare Metal)
     #
