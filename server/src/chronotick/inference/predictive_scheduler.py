@@ -570,6 +570,46 @@ class PredictiveScheduler:
 
                 logger.info(f"[SCHEDULER_CACHE] Cache trimmed: removed {len(keys_to_remove)} entries far from current time ({current_time:.0f})")
     
+    def _interpolate_correction(self, correction: CorrectionWithBounds, current_time: float) -> CorrectionWithBounds:
+        """
+        Apply drift-based interpolation to a cached correction for continuous time accuracy.
+
+        This ensures that two client queries 1ms apart return different interpolated results
+        instead of the same stale 1-second-granularity prediction.
+
+        Args:
+            correction: Base correction from cache (at integer timestamp)
+            current_time: Actual query time (may have sub-second component)
+
+        Returns:
+            Interpolated correction with offset adjusted for drift over delta_t
+        """
+        # Calculate time elapsed since this prediction was made
+        delta_t = current_time - correction.prediction_time
+
+        # Interpolate offset using drift rate
+        # offset(t) = offset(t0) + drift_rate * Δt
+        interpolated_offset = correction.offset_correction + (correction.drift_rate * delta_t)
+
+        logger.debug(f"[SCHEDULER_INTERP] t={current_time:.3f}, base_t={correction.prediction_time:.0f}, "
+                    f"Δt={delta_t:.3f}s, base_offset={correction.offset_correction*1000:.3f}ms, "
+                    f"drift={correction.drift_rate*1e6:.3f}μs/s, "
+                    f"interpolated_offset={interpolated_offset*1000:.3f}ms "
+                    f"(Δ={abs(interpolated_offset - correction.offset_correction)*1000:.3f}ms)")
+
+        # Create new correction with interpolated offset
+        return CorrectionWithBounds(
+            offset_correction=interpolated_offset,  # Interpolated offset
+            drift_rate=correction.drift_rate,  # Drift rate unchanged
+            offset_uncertainty=correction.offset_uncertainty,
+            drift_uncertainty=correction.drift_uncertainty,
+            prediction_time=correction.prediction_time,
+            valid_until=correction.valid_until,
+            confidence=correction.confidence,
+            source=correction.source,
+            quantiles=correction.quantiles
+        )
+
     def get_correction_at_time(self, current_time: float) -> Optional[CorrectionWithBounds]:
         """
         Get correction for current time - should be immediately available
@@ -586,7 +626,8 @@ class PredictiveScheduler:
                 logger.info(f"[SCHEDULER] Found exact match at timestamp={timestamp}, valid={correction.is_valid(current_time)}, source={correction.source}")
                 if correction.is_valid(current_time):
                     self.stats['cache_hits'] += 1
-                    return correction
+                    # CRITICAL: Apply drift-based interpolation for continuous time accuracy
+                    return self._interpolate_correction(correction, current_time)
 
             # Check for nearby cached predictions
             logger.info(f"[SCHEDULER] No exact match, checking nearby timestamps...")
@@ -597,7 +638,8 @@ class PredictiveScheduler:
                     logger.info(f"[SCHEDULER] Found nearby match at timestamp={check_time}, valid={correction.is_valid(current_time)}, source={correction.source}")
                     if correction.is_valid(current_time):
                         self.stats['cache_hits'] += 1
-                        return correction
+                        # CRITICAL: Apply drift-based interpolation for continuous time accuracy
+                        return self._interpolate_correction(correction, current_time)
 
             # Cache miss - this shouldn't happen with proper scheduling
             self.stats['cache_misses'] += 1
@@ -632,6 +674,11 @@ class PredictiveScheduler:
             logger.info(f"[SCHEDULER] Fusion check: cpu={cpu_correction is not None}, gpu={gpu_correction is not None}, fusion_engine={self.fusion_engine is not None}")
             if cpu_correction and gpu_correction and self.fusion_engine:
                 logger.info("[SCHEDULER] Applying fusion of CPU and GPU predictions")
+
+                # CRITICAL: Interpolate both predictions BEFORE fusion
+                cpu_interp = self._interpolate_correction(cpu_correction, current_time)
+                gpu_interp = self._interpolate_correction(gpu_correction, current_time)
+
                 # Calculate temporal weights based on CPU prediction window
                 cpu_window_start = timestamp - (timestamp % self.cpu_interval)
                 time_in_window = timestamp - cpu_window_start
@@ -641,14 +688,18 @@ class PredictiveScheduler:
                 cpu_weight = 1.0 - cpu_progress
                 gpu_weight = cpu_progress
 
+                # Fuse interpolated predictions
                 return self.fusion_engine.fuse_predictions(
-                    cpu_correction, gpu_correction, cpu_weight, gpu_weight
+                    cpu_interp, gpu_interp, cpu_weight, gpu_weight
                 )
 
-            # Fallback to available prediction
+            # Fallback to available prediction (with interpolation)
             result = cpu_correction or gpu_correction
             logger.info(f"[SCHEDULER] Returning fallback prediction: {result.source if result else None}")
-            return result
+            if result:
+                # CRITICAL: Apply drift-based interpolation for continuous time accuracy
+                return self._interpolate_correction(result, current_time)
+            return None
     
     def get_stats(self) -> dict:
         """Get scheduler statistics"""
