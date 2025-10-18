@@ -136,7 +136,11 @@ class PredictiveScheduler:
         self.gpu_horizon = self.config['prediction_scheduling']['gpu_model']['prediction_horizon']
         self.gpu_lead_time = self.config['prediction_scheduling']['gpu_model']['prediction_lead_time']
         self.gpu_max_inference = self.config['prediction_scheduling']['gpu_model']['max_inference_time']
-        
+
+        # NTP check interval from config
+        self.ntp_check_interval = self.config['clock_measurement']['ntp']['timing']['normal_operation']['measurement_interval']
+        logger.info(f"[SCHEDULER_NTP] NTP check interval: {self.ntp_check_interval}s")
+
         # Prediction cache
         self.cache_size = self.config['prediction_scheduling']['dataset']['prediction_cache_size']
         self.prediction_cache: Dict[float, CorrectionWithBounds] = {}
@@ -249,10 +253,15 @@ class PredictiveScheduler:
         # Schedule first CPU prediction
         cpu_target_time = self._next_cpu_target_time(current_time)
         self._schedule_cpu_prediction(cpu_target_time)
-        
-        # Schedule first GPU prediction  
+
+        # Schedule first GPU prediction
         gpu_target_time = self._next_gpu_target_time(current_time)
         self._schedule_gpu_prediction(gpu_target_time)
+
+        # Schedule first NTP check (CRITICAL: enables backtracking correction)
+        ntp_check_time = current_time + self.ntp_check_interval
+        self._schedule_ntp_check(ntp_check_time)
+        logger.info(f"[SCHEDULER_NTP] Initial NTP check scheduled for {ntp_check_time:.0f} (in {self.ntp_check_interval}s)")
     
     def _next_cpu_target_time(self, current_time: float) -> float:
         """Calculate next CPU prediction target time"""
@@ -295,6 +304,29 @@ class PredictiveScheduler:
             self.stats['predictions_scheduled'] += 1
 
         logger.debug(f"Scheduled GPU prediction for t={target_time} (exec at t={execution_time})")
+
+    def _schedule_ntp_check(self, check_time: float):
+        """
+        Schedule periodic NTP check to enable backtracking correction.
+
+        CRITICAL: This is what triggers apply_ntp_correction() which does:
+        1. Checks for new NTP measurements
+        2. Applies backtracking to correct recent predictions
+        3. Adds NTP measurements to dataset as ground truth anchors
+
+        Without this, dataset fills with 100% predictions → feedback loop!
+        """
+        task = ScheduledTask(
+            execution_time=check_time,
+            task_id=f"ntp_check_{check_time}",
+            task_function=self._execute_ntp_check,
+            args=(check_time,)
+        )
+
+        with self.lock:
+            heapq.heappush(self.task_queue, task)
+
+        logger.info(f"[SCHEDULER_NTP] Scheduled NTP check for t={check_time:.0f}")
 
     def _cap_prediction_offset(self, offset: float) -> tuple:
         """
@@ -482,7 +514,37 @@ class PredictiveScheduler:
             # This prevents the self-scheduling chain from breaking
             next_target = start_time + self.gpu_interval
             self._schedule_gpu_prediction(next_target)
-    
+
+    def _execute_ntp_check(self, check_time: float):
+        """
+        Execute NTP check to trigger backtracking correction.
+
+        This is the CRITICAL missing link that was causing 100% prediction feedback loop!
+        """
+        try:
+            logger.info(f"[SCHEDULER_NTP] ═══════════════════════════════════════════")
+            logger.info(f"[SCHEDULER_NTP] EXECUTING NTP CHECK at t={check_time:.0f}")
+
+            if not self.pipeline:
+                logger.error("[SCHEDULER_NTP] Pipeline not available, cannot check for NTP updates")
+                return
+
+            # Call pipeline's NTP check which triggers apply_ntp_correction()
+            logger.info(f"[SCHEDULER_NTP] Calling pipeline._check_for_ntp_updates()...")
+            self.pipeline._check_for_ntp_updates(check_time)
+
+            logger.info(f"[SCHEDULER_NTP] NTP check completed")
+            logger.info(f"[SCHEDULER_NTP] ═══════════════════════════════════════════")
+
+        except Exception as e:
+            logger.error(f"[SCHEDULER_NTP] NTP check failed: {e}", exc_info=True)
+
+        finally:
+            # CRITICAL: Schedule next NTP check to keep the chain alive
+            next_check_time = check_time + self.ntp_check_interval
+            self._schedule_ntp_check(next_check_time)
+            logger.info(f"[SCHEDULER_NTP] Next NTP check scheduled for t={next_check_time:.0f} (in {self.ntp_check_interval}s)")
+
     def _cache_prediction(self, timestamp: float, correction: CorrectionWithBounds):
         """Cache prediction with size management"""
         logger.info(f"[SCHEDULER_CACHE] Caching prediction: timestamp={timestamp:.0f}, source={correction.source}, offset={correction.offset_correction*1000:.2f}ms")
