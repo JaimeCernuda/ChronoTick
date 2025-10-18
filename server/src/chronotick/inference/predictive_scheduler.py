@@ -138,7 +138,7 @@ class PredictiveScheduler:
         self.gpu_max_inference = self.config['prediction_scheduling']['gpu_model']['max_inference_time']
 
         # NTP check interval from config
-        self.ntp_check_interval = self.config['clock_measurement']['ntp']['timing']['normal_operation']['measurement_interval']
+        self.ntp_check_interval = self.config['clock_measurement']['timing']['normal_operation']['measurement_interval']
         logger.info(f"[SCHEDULER_NTP] NTP check interval: {self.ntp_check_interval}s")
 
         # Prediction cache
