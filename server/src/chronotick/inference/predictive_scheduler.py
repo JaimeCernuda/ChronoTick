@@ -314,6 +314,9 @@ class PredictiveScheduler:
         max_multiplier = 2.5  # Default
         if self.pipeline and hasattr(self.pipeline, 'last_ntp_offset'):
             last_ntp_offset = self.pipeline.last_ntp_offset
+            logger.debug(f"[SCHEDULER_CAP_DEBUG] Retrieved from pipeline: last_ntp_offset={last_ntp_offset}, type={type(last_ntp_offset)}")
+        else:
+            logger.warning(f"[SCHEDULER_CAP_DEBUG] Pipeline access failed: pipeline={self.pipeline}, has_attr={hasattr(self.pipeline, 'last_ntp_offset') if self.pipeline else 'N/A'}")
         if self.pipeline and hasattr(self.pipeline, 'max_multiplier'):
             max_multiplier = self.pipeline.max_multiplier
 
@@ -381,11 +384,12 @@ class PredictiveScheduler:
 
                 # CRITICAL FIX: Write to dataset for autoregressive training at 1Hz
                 # This ensures model trains on recent predictions, not just NTP
-                # IMPORTANT: Use CAPPED offset to prevent dataset contamination
+                # IMPORTANT: Store UNCAPPED predictions so model learns from its actual output
+                # Capping is only for safety when serving to clients (cache above)
                 if self.dataset_manager:
                     self.dataset_manager.add_prediction(
                         timestamp=timestamp,
-                        offset=capped_offset,  # Use capped offset
+                        offset=pred.offset,  # Use UNCAPPED offset for training
                         drift=pred.drift,
                         source="cpu",
                         uncertainty=pred.offset_uncertainty,
@@ -451,11 +455,12 @@ class PredictiveScheduler:
 
                 # CRITICAL FIX: Write to dataset for autoregressive training at 1Hz
                 # This ensures model trains on recent predictions, not just NTP
-                # IMPORTANT: Use CAPPED offset to prevent dataset contamination
+                # IMPORTANT: Store UNCAPPED predictions so model learns from its actual output
+                # Capping is only for safety when serving to clients (cache above)
                 if self.dataset_manager:
                     self.dataset_manager.add_prediction(
                         timestamp=timestamp,
-                        offset=capped_offset,  # Use capped offset
+                        offset=pred.offset,  # Use UNCAPPED offset for training
                         drift=pred.drift,
                         source="gpu",
                         uncertainty=pred.offset_uncertainty,
