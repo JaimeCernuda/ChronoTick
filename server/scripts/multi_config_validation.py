@@ -195,7 +195,7 @@ class ConfigurationTest:
             validation_cmd,
             stdout=open(validation_log, 'w'),
             stderr=subprocess.STDOUT,
-            cwd=Path(__file__).parent.parent
+            cwd=Path(__file__).parent.parent.parent
         )
 
     def _cleanup(self):
