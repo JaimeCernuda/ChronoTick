@@ -289,6 +289,11 @@ def main():
         action="store_true",
         help="Print test plan without running"
     )
+    parser.add_argument(
+        "--yes", "-y",
+        action="store_true",
+        help="Skip confirmation prompt and start immediately"
+    )
 
     args = parser.parse_args()
 
@@ -314,11 +319,12 @@ def main():
         print("\nDry run complete. Use without --dry-run to execute.")
         return
 
-    # Confirm start
-    response = input("\nStart testing? (y/n): ")
-    if response.lower() != 'y':
-        print("Aborted.")
-        return
+    # Confirm start (skip if --yes flag is set)
+    if not args.yes:
+        response = input("\nStart testing? (y/n): ")
+        if response.lower() != 'y':
+            print("Aborted.")
+            return
 
     # Create output directory
     output_dir = Path(args.output)
