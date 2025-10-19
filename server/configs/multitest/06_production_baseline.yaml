@@ -1,0 +1,129 @@
+# Configuration 6: Production Baseline - REFERENCE CONFIGURATION
+# Phase 2: Correction Method Comparison
+# Tests: Current production setup with all optimizations
+# THIS IS IDENTICAL TO THE HOMELAB PRODUCTION CONFIGURATION
+
+clock:
+  frequency_code: 9
+  frequency_type: second
+
+clock_measurement:
+  ntp:
+    max_acceptable_uncertainty: 0.1
+    max_stratum: 16
+    measurement_mode: advanced
+    min_stratum: 1
+    servers:
+    - pool.ntp.org
+    - time.google.com
+    - time.cloudflare.com
+    - time.nist.gov
+    timeout_seconds: 2.0
+    outlier_window_size: 20
+    outlier_sigma_threshold: 3.0
+  timing:
+    normal_operation:
+      measurement_interval: 120
+    warm_up:
+      duration_seconds: 60
+      measurement_interval: 1
+
+covariates:
+  enabled: false
+  future_variables: []
+  variables: []
+
+fusion:
+  enabled: true
+  fallback_weights:
+    long_term: 0.2
+    short_term: 0.8
+  method: inverse_variance
+  uncertainty_threshold: 0.05
+
+logging:
+  level: INFO
+  log_fusion_weights: true
+  log_predictions: true
+  log_uncertainty: true
+
+long_term:
+  context_length: 512
+  device: cpu
+  enabled: true
+  inference_interval: 30.0
+  max_uncertainty: 0.15
+  model_name: timesfm
+  model_params:
+    backend: cpu
+    context_length: 512
+    model_repo: google/timesfm-2.5-200m-pytorch
+    prediction_length: 60
+  prediction_horizon: 60
+
+short_term:
+  context_length: 512
+  device: cpu
+  enabled: true
+  inference_interval: 1.0
+  max_uncertainty: 0.1
+  model_name: timesfm
+  model_params:
+    backend: cpu
+    context_length: 512
+    model_repo: google/timesfm-2.5-200m-pytorch
+    prediction_length: 30
+  prediction_horizon: 30
+
+performance:
+  batch_size: 1
+  cache_size: 5
+  max_memory_mb: 2048
+  model_timeout: 10.0
+
+prediction_scheduling:
+  baseline_smoothing:
+    enabled: true
+    alpha: 0.3
+  cpu_model:
+    max_inference_time: 2.0
+    prediction_horizon: 30
+    prediction_interval: 5
+    prediction_lead_time: 5
+  dataset:
+    max_history_size: 1000
+    prediction_cache_size: 100
+  gpu_model:
+    max_inference_time: 5.0
+    prediction_horizon: 240
+    prediction_interval: 30
+    prediction_lead_time: 10
+  ntp_correction:
+    drift_uncertainty: 0.0001
+    enabled: true  # BACKTRACKING CORRECTION (PRODUCTION)
+    method: backtracking
+    offset_uncertainty: 0.001
+  drift_calculation:
+    method: windowed  # WINDOWED DRIFT (PHASE 3B - PRODUCTION)
+    window_size: 10
+    min_measurements: 5
+  adaptive_capping:
+    max_multiplier: 2.5
+    absolute_max: 0.300
+    absolute_min: 0.001
+  sanity_check:
+    enabled: false
+  confidence_capping:
+    enabled: false
+
+preprocessing:
+  missing_value_handling:
+    enabled: true
+    method: interpolate
+  normalization:
+    enabled: false
+    method: zscore
+  outlier_removal:
+    enabled: true
+    method: iqr
+    threshold: 2.0
