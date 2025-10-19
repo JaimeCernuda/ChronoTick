@@ -157,7 +157,7 @@ class ConfigurationTest:
 
         # Kill any existing daemon
         subprocess.run(
-            ["python", "-m", "chronotick.inference.daemon", "stop"],
+            [sys.executable, "-m", "chronotick.inference.daemon", "stop"],
             cwd=Path(__file__).parent.parent,
             env={**os.environ, "PYTHONPATH": str(Path(__file__).parent.parent / "src")},
             capture_output=True
@@ -214,7 +214,7 @@ class ConfigurationTest:
         if self.daemon_proc:
             try:
                 subprocess.run(
-                    ["python", "-m", "chronotick.inference.daemon", "stop"],
+                    [sys.executable, "-m", "chronotick.inference.daemon", "stop"],
                     cwd=Path(__file__).parent.parent,
                     env={**os.environ, "PYTHONPATH": str(Path(__file__).parent.parent / "src")},
                     timeout=15,
