@@ -167,25 +167,36 @@ class NTPClient:
     def measure_offset(self, server: str) -> Optional[NTPMeasurement]:
         """
         Measure clock offset against single NTP server.
-        
+
+        Supports both "hostname" and "hostname:port" formats.
+        Default port is 123 if not specified.
+
         Returns: NTPMeasurement or None if measurement failed
         """
         try:
+            # Parse server address and port
+            if ':' in server:
+                server_host, port_str = server.rsplit(':', 1)
+                port = int(port_str)
+            else:
+                server_host = server
+                port = 123  # Default NTP port
+
             # Record precise local time before NTP request
             t1_local = time.time()
-            
+
             # Create NTP request packet
             ntp_packet = self._create_ntp_request()
-            
+
             # Send request to NTP server
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.settimeout(self.config.timeout_seconds)
-            
+
             try:
-                sock.sendto(ntp_packet, (server, 123))
+                sock.sendto(ntp_packet, (server_host, port))
                 response, _ = sock.recvfrom(1024)
                 t4_local = time.time()  # Record local time after response
-                
+
             finally:
                 sock.close()
             
