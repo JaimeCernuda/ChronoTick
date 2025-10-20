@@ -14,6 +14,7 @@ import sys
 import time
 import csv
 import ntplib
+import argparse
 from pathlib import Path
 from datetime import datetime
 
@@ -24,6 +25,20 @@ from chronotick.inference.engine import ChronoTickInferenceEngine
 from chronotick.inference.real_data_pipeline import RealDataPipeline
 from chronotick.inference.tsfm_model_wrapper import create_model_wrappers
 
+# Parse command-line arguments
+parser = argparse.ArgumentParser(description='ChronoTick Client-Driven Validation Test')
+parser.add_argument('--config', default='configs/config_stable_clock.yaml',
+                    help='Path to ChronoTick configuration file')
+parser.add_argument('--ntp-server', default='time.google.com',
+                    help='NTP server for ground truth (supports IP:port format, e.g., 172.20.1.1:8123)')
+parser.add_argument('--duration', type=int, default=480,
+                    help='Test duration in minutes (default: 480 = 8 hours)')
+parser.add_argument('--sample-interval', type=int, default=10,
+                    help='Sample interval in seconds (default: 10)')
+parser.add_argument('--ntp-interval', type=int, default=120,
+                    help='NTP measurement interval in seconds (default: 120 = 2 minutes)')
+args = parser.parse_args()
+
 print("=" * 80)
 print("CLIENT-DRIVEN LONG-TERM VALIDATION TEST")
 print("=" * 80)
@@ -31,23 +46,32 @@ print(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 print()
 
 # Configuration
-TEST_DURATION_MINUTES = 480  # 8 hours overnight test
-SAMPLE_INTERVAL_SECONDS = 10  # Sample every 10 seconds
-NTP_INTERVAL_SECONDS = 120  # NTP every 2 minutes (reduce network load for long test)
-NTP_SERVER = "time.google.com"
+TEST_DURATION_MINUTES = args.duration
+SAMPLE_INTERVAL_SECONDS = args.sample_interval
+NTP_INTERVAL_SECONDS = args.ntp_interval
+NTP_SERVER = args.ntp_server
 TIMESTAMP = datetime.now().strftime('%Y%m%d_%H%M%S')
 CSV_PATH = f"/tmp/chronotick_client_validation_{TIMESTAMP}.csv"
+
+# Parse NTP server address and port
+if ':' in NTP_SERVER:
+    ntp_host, ntp_port_str = NTP_SERVER.rsplit(':', 1)
+    ntp_port = int(ntp_port_str)
+else:
+    ntp_host = NTP_SERVER
+    ntp_port = 123  # Default NTP port
 
 print(f"Configuration:")
 print(f"  Test duration: {TEST_DURATION_MINUTES} minutes")
 print(f"  Sample interval: {SAMPLE_INTERVAL_SECONDS} seconds")
 print(f"  NTP interval: {NTP_INTERVAL_SECONDS} seconds ({NTP_INTERVAL_SECONDS//60} minutes)")
-print(f"  NTP server: {NTP_SERVER}")
+print(f"  NTP server: {ntp_host}:{ntp_port}")
+print(f"  ChronoTick config: {args.config}")
 print(f"  CSV output: {CSV_PATH}")
 print()
 
 # Initialize ChronoTick system
-config_path = "configs/config_stable_clock.yaml"
+config_path = args.config
 
 print("Initializing ChronoTick system...")
 engine = ChronoTickInferenceEngine(config_path)
@@ -160,8 +184,8 @@ try:
 
         if elapsed - last_ntp_time >= NTP_INTERVAL_SECONDS:
             try:
-                # Get NTP response
-                response = ntp_client.request(NTP_SERVER, version=3, timeout=2)
+                # Get NTP response using parsed host and port
+                response = ntp_client.request(ntp_host, port=ntp_port, version=3, timeout=2)
 
                 # NTP time is the reference time from the server
                 # tx_time is when server sent the response
@@ -171,7 +195,7 @@ try:
                 # Positive = our clock is ahead, Negative = our clock is behind
                 ntp_offset_ms = response.offset * 1000
                 ntp_uncertainty_ms = response.root_delay * 1000 / 2  # Approximate uncertainty
-                ntp_server_used = NTP_SERVER
+                ntp_server_used = f"{ntp_host}:{ntp_port}"
                 has_ntp = True
                 last_ntp_time = elapsed
                 ntp_sample_count += 1
