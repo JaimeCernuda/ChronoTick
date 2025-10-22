@@ -1954,10 +1954,13 @@ class RealDataPipeline:
         logger.info(f"[CACHE_LOOKUP] _get_predictive_correction called: current_time={current_time:.2f}")
 
         # Log cache state BEFORE lookup
+        # FUSION FIX: Handle tuple keys (timestamp, source) instead of plain timestamps
         cache_size = len(self.predictive_scheduler.prediction_cache)
         if cache_size > 0:
             cache_keys = sorted(self.predictive_scheduler.prediction_cache.keys())
-            logger.info(f"[CACHE_STATE] Cache has {cache_size} entries, range: {cache_keys[0]:.0f} - {cache_keys[-1]:.0f}")
+            # Extract timestamps from tuple keys for range display
+            timestamps = sorted([k[0] for k in cache_keys])
+            logger.info(f"[CACHE_STATE] Cache has {cache_size} entries, time range: {timestamps[0]:.0f} - {timestamps[-1]:.0f}")
         else:
             logger.info(f"[CACHE_STATE] Cache is EMPTY")
 
