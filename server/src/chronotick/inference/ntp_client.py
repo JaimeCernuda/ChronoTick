@@ -42,9 +42,9 @@ class NTPConfig:
     min_stratum: int = 3
     max_delay: float = 0.100  # 100ms max acceptable delay
     measurement_mode: str = "simple"  # "simple" or "advanced" (2-3 queries with averaging)
-    # Outlier rejection
+    # Outlier rejection (with adaptive EMA baseline)
     outlier_window_size: int = 20  # Rolling window for outlier detection
-    outlier_sigma_threshold: float = 3.0  # Z-score threshold for outlier rejection
+    outlier_sigma_threshold: float = 5.0  # Z-score threshold (increased for adaptive filter with drift)
 
 
 class NTPOutlierFilter:
