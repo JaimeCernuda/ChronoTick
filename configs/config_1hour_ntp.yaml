@@ -1,0 +1,149 @@
+clock:
+  frequency_code: 9
+  frequency_type: second
+clock_measurement:
+  ntp:
+    max_acceptable_uncertainty: 0.1
+    max_stratum: 16
+    measurement_mode: advanced
+    min_stratum: 1
+    servers:
+    - pool.ntp.org
+    - time.nist.gov
+    - time.google.com
+    timeout_seconds: 2.0
+    # Phase 1: NTP Outlier Rejection
+    outlier_window_size: 20
+    outlier_sigma_threshold: 3.0
+  timing:
+    normal_operation:
+      measurement_interval: 3600  # 2 minutes - faster learning
+    warm_up:
+      duration_seconds: 60
+      measurement_interval: 1  # 1 second - aggressive warmup
+covariates:
+  enabled: false
+  future_variables: []
+  variables:
+  - cpu_usage
+  - temperature
+  - memory_usage
+fusion:
+  enabled: true
+  fallback_weights:
+    long_term: 0.2
+    short_term: 0.8
+  method: none
+  uncertainty_threshold: 0.05
+logging:
+  level: INFO
+  log_fusion_weights: true
+  log_predictions: true
+  log_uncertainty: true
+long_term:
+  context_length: 512
+  device: cpu
+  enabled: true
+  inference_interval: 30.0
+  max_uncertainty: 0.15
+  model_name: timesfm
+  model_params:
+    backend: cpu
+    context_length: 512
+    model_repo: google/timesfm-2.5-200m-pytorch
+    prediction_length: 60
+  prediction_horizon: 60
+performance:
+  batch_size: 1
+  cache_size: 5
+  max_memory_mb: 2048
+  model_timeout: 10.0
+prediction_scheduling:
+  # Phase 2: Baseline Smoothing
+  baseline_smoothing:
+    enabled: true
+    alpha: 0.3  # EMA coefficient (0.3 = 30% new, 70% old)
+  cpu_model:
+    max_inference_time: 2.0
+    prediction_horizon: 30
+    prediction_interval: 5
+    prediction_lead_time: 5
+  dataset:
+    max_history_size: 1000
+    prediction_cache_size: 100
+  gpu_model:
+    max_inference_time: 5.0
+    prediction_horizon: 240
+    prediction_interval: 30
+    prediction_lead_time: 10
+  ntp_correction:
+    drift_uncertainty: 0.0001
+    enabled: true
+    method: backtracking
+    offset_uncertainty: 0.001
+  drift_calculation:
+    # Phase 3B: Window-based drift calculation for stable clocks
+    # Uses linear regression over multiple NTP measurements to reduce noise sensitivity
+    method: windowed              # "windowed" (Phase 3B) or "consecutive" (Phase 3A)
+    window_size: 10               # Number of measurements for regression (typical: 10-20)
+    min_measurements: 5           # Minimum measurements before calculating drift
+  adaptive_capping:
+    # CONFIGURATION: STABLE CLOCKS (Physical Servers, Homelab, Bare Metal)
+    #
+    # Problem: Low clock drift (0-10μs/s) means Phase 3 drift calculation is
+    # dominated by measurement noise instead of true signal.
+    #
+    # Example: Homelab with -0.5ms baseline + ~5μs/s drift
+    #   → Expected drift over 30s: 5μs/s × 30s = 150μs = 0.15ms
+    #   → NTP noise: ±1ms (much larger than signal!)
+    #   → Phase 3 calculates noise instead: -844μs/s (wrong by 170x!)
+    #
+    # Solution: Conservative capping (2.5x) limits damage from wrong drift
+    # calculations until Phase 3 is fixed with window-based linear regression.
+    #
+    # Future: Once Phase 3 uses robust drift calculation, this can be increased
+    # to 5.0x-10.0x like unstable clocks.
+    max_multiplier: 2.5        # Conservative cap (2.5x NTP baseline) - protects from noise
+    absolute_max: 0.300        # Hard max: 300ms (prevent catastrophic predictions)
+    absolute_min: 0.001        # Minimum cap: 1ms (allow convergence)
+  sanity_check:
+    # LAYER 2: DISABLED - Let ML predictions through unmodified
+    # Rationale: Sanity check was rejecting valid predictions (< 1ms) on stable clocks
+    # If ML is wrong, we want to see it in validation data and FIX THE ML, not hide it!
+    enabled: false
+    adaptive_range_multiplier: 4.0   # Predictions within avg_error ± (4 × avg_error)
+    absolute_min_bound: 0.0           # No lower bound - allow any prediction
+    absolute_max_bound: 10.0          # Never allow predictions > 10s
+    relative_limit: 5.0               # Fallback: Reject if > 5x average NTP magnitude
+    statistical_limit: 3.0            # Fallback: Reject if > 3 sigma from NTP mean
+  confidence_capping:
+    # LAYER 3: DISABLED
+    enabled: false
+    high_confidence_threshold: 0.8
+    medium_confidence_threshold: 0.5
+    medium_confidence_multiplier: 1.5
+    low_confidence_multiplier: 1.2
+preprocessing:
+  missing_value_handling:
+    enabled: true
+    method: interpolate
+  normalization:
+    enabled: false
+    method: zscore
+  outlier_removal:
+    enabled: true
+    method: iqr
+    threshold: 2.0
+short_term:
+  context_length: 512
+  device: cpu
+  enabled: true
+  inference_interval: 1.0
+  max_uncertainty: 0.1
+  model_name: timesfm
+  model_params:
+    backend: cpu
+    context_length: 512
+    model_repo: google/timesfm-2.5-200m-pytorch
+    prediction_length: 30
+  prediction_horizon: 30

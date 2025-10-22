@@ -1,0 +1,62 @@
+# NTP Proxy Configuration for ARES Cluster
+#
+# Maps high ports (8123-8132) on head node to 10 external NTP servers.
+# Compute nodes use 172.20.1.1:<listen_port> instead of external servers.
+#
+# ChronoTick config usage (on compute nodes):
+#   ntp_servers:
+#     - 172.20.1.1:8123  # -> time.google.com
+#     - 172.20.1.1:8124  # -> time1.google.com
+#     - 172.20.1.1:8125  # -> time2.google.com
+#     - 172.20.1.1:8126  # -> time3.google.com
+#     - 172.20.1.1:8127  # -> time.cloudflare.com
+#     - 172.20.1.1:8128  # -> time.nist.gov
+#     - 172.20.1.1:8129  # -> 0.pool.ntp.org
+#     - 172.20.1.1:8130  # -> 1.pool.ntp.org
+#     - 172.20.1.1:8131  # -> 2.pool.ntp.org
+#     - 172.20.1.1:8132  # -> 3.pool.ntp.org
+
+proxy_mappings:
+  # Tier 1: Google (4 servers for redundancy)
+  - listen_port: 8123
+    ntp_server: time.google.com
+    ntp_port: 123
+
+  - listen_port: 8124
+    ntp_server: time1.google.com
+    ntp_port: 123
+
+  - listen_port: 8125
+    ntp_server: time2.google.com
+    ntp_port: 123
+
+  - listen_port: 8126
+    ntp_server: time3.google.com
+    ntp_port: 123
+
+  # Tier 2: Cloudflare
+  - listen_port: 8127
+    ntp_server: time.cloudflare.com
+    ntp_port: 123
+
+  # Tier 3: NIST
+  - listen_port: 8128
+    ntp_server: time.nist.gov
+    ntp_port: 123
+
+  # Tier 4: NTP Pool (4 servers for diversity)
+  - listen_port: 8129
+    ntp_server: 0.pool.ntp.org
+    ntp_port: 123
+
+  - listen_port: 8130
+    ntp_server: 1.pool.ntp.org
+    ntp_port: 123
+
+  - listen_port: 8131
+    ntp_server: 2.pool.ntp.org
+    ntp_port: 123
+
+  - listen_port: 8132
+    ntp_server: 3.pool.ntp.org
+    ntp_port: 123
