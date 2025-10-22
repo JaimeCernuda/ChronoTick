@@ -422,7 +422,7 @@ class PredictiveScheduler:
                     prediction_time=timestamp,  # Time this prediction is FOR, not when cached
                     valid_until=end_time,
                     confidence=pred.confidence,
-                    source="cpu",
+                    source=pred.source if hasattr(pred, 'source') else "cpu",  # Use actual source from prediction
                     quantiles=pred.quantiles  # Pass quantiles from prediction
                 )
 
@@ -455,7 +455,7 @@ class PredictiveScheduler:
                         timestamp=timestamp,
                         offset=pred.offset,  # Use UNCAPPED offset for training
                         drift=pred.drift,
-                        source="cpu",
+                        source=pred.source if hasattr(pred, 'source') else "cpu",  # Use actual source from prediction
                         uncertainty=pred.offset_uncertainty,
                         confidence=pred.confidence,
                         was_capped=was_capped  # Track if it was capped
@@ -513,7 +513,7 @@ class PredictiveScheduler:
                     prediction_time=timestamp,  # Time this prediction is FOR, not when cached
                     valid_until=end_time,
                     confidence=pred.confidence,
-                    source="gpu",
+                    source=pred.source if hasattr(pred, 'source') else "gpu",  # Use actual source from prediction
                     quantiles=pred.quantiles  # Pass quantiles from prediction
                 )
 
@@ -536,7 +536,7 @@ class PredictiveScheduler:
                         timestamp=timestamp,
                         offset=pred.offset,  # Use UNCAPPED offset for training
                         drift=pred.drift,
-                        source="gpu",
+                        source=pred.source if hasattr(pred, 'source') else "gpu",  # Use actual source from prediction
                         uncertainty=pred.offset_uncertainty,
                         confidence=pred.confidence,
                         was_capped=was_capped  # Track if it was capped
