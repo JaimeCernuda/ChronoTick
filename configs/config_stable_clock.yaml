@@ -12,9 +12,9 @@ clock_measurement:
     - time.nist.gov
     - time.google.com
     timeout_seconds: 2.0
-    # Phase 1: NTP Outlier Rejection
+    # Phase 1: NTP Outlier Rejection (with adaptive EMA baseline)
     outlier_window_size: 20
-    outlier_sigma_threshold: 3.0
+    outlier_sigma_threshold: 5.0  # Increased from 3.0 for adaptive filter with drift
   timing:
     normal_operation:
       measurement_interval: 120  # 2 minutes - faster learning
