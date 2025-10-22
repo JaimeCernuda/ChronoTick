@@ -83,11 +83,8 @@ cpu_wrapper, gpu_wrapper = create_model_wrappers(
     engine, pipeline.dataset_manager, pipeline.system_metrics
 )
 pipeline.initialize(cpu_model=cpu_wrapper, gpu_model=gpu_wrapper)
-pipeline.predictive_scheduler.set_model_interfaces(
-    cpu_model=cpu_wrapper,
-    gpu_model=gpu_wrapper,
-    fusion_engine=pipeline.fusion_engine
-)
+# NOTE: pipeline.initialize() already calls set_model_interfaces() with dataset_manager and pipeline
+# DO NOT call set_model_interfaces() again here - it will overwrite the correct injection with None!
 print("✓ Pipeline initialized")
 print()
 
