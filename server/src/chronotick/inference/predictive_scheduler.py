@@ -141,9 +141,9 @@ class PredictiveScheduler:
         self.ntp_check_interval = self.config['clock_measurement']['timing']['normal_operation']['measurement_interval']
         logger.info(f"[SCHEDULER_NTP] NTP check interval: {self.ntp_check_interval}s")
 
-        # Prediction cache
+        # Prediction cache (FUSION FIX: Use (timestamp, source) tuple keys to allow multiple sources per timestamp)
         self.cache_size = self.config['prediction_scheduling']['dataset']['prediction_cache_size']
-        self.prediction_cache: Dict[float, CorrectionWithBounds] = {}
+        self.prediction_cache: Dict[Tuple[float, str], CorrectionWithBounds] = {}
 
         # CRITICAL: Load capping parameters to prevent runaway predictions
         adaptive_capping = self.config['prediction_scheduling'].get('adaptive_capping', {})
@@ -588,19 +588,22 @@ class PredictiveScheduler:
             logger.info(f"[SCHEDULER_NTP] Next NTP check scheduled for t={next_check_time:.0f} (in {self.ntp_check_interval}s)")
 
     def _cache_prediction(self, timestamp: float, correction: CorrectionWithBounds):
-        """Cache prediction with size management"""
+        """Cache prediction with size management (FUSION FIX: Use tuple keys to prevent overwrites)"""
         logger.info(f"[SCHEDULER_CACHE] Caching prediction: timestamp={timestamp:.0f}, source={correction.source}, offset={correction.offset_correction*1000:.2f}ms")
         with self.lock:
-            self.prediction_cache[timestamp] = correction
+            # FUSION FIX: Use (timestamp, source) tuple key to allow multiple sources per timestamp
+            cache_key = (timestamp, correction.source)
+            self.prediction_cache[cache_key] = correction
 
             # Manage cache size - keep predictions around CURRENT time, not furthest future
+            # FUSION FIX: Handle tuple keys (timestamp, source) instead of plain timestamps
             if len(self.prediction_cache) > self.cache_size:
                 current_time = time.time()
 
-                # Sort keys by distance from current time
+                # Sort keys by distance from current time (extract timestamp from tuple)
                 sorted_keys = sorted(
                     self.prediction_cache.keys(),
-                    key=lambda t: abs(t - current_time)
+                    key=lambda k: abs(k[0] - current_time)  # k[0] is timestamp in (timestamp, source) tuple
                 )
 
                 # Keep the closest N entries to current time
@@ -656,43 +659,53 @@ class PredictiveScheduler:
         """
         Get correction for current time - should be immediately available
         from pre-computed predictions
+        FUSION FIX: Check both CPU and GPU sources (prefer CPU for frequent updates)
         """
         logger.info(f"[SCHEDULER] get_correction_at_time called: current_time={current_time:.2f}")
         timestamp = math.floor(current_time)  # Round to nearest second
         logger.info(f"[SCHEDULER] Rounded timestamp: {timestamp}, cache_size={len(self.prediction_cache)}")
 
         with self.lock:
-            # Check cache for exact match
-            if timestamp in self.prediction_cache:
-                correction = self.prediction_cache[timestamp]
-                logger.info(f"[SCHEDULER] Found exact match at timestamp={timestamp}, valid={correction.is_valid(current_time)}, source={correction.source}")
-                if correction.is_valid(current_time):
-                    self.stats['cache_hits'] += 1
-                    # CRITICAL: Apply drift-based interpolation for continuous time accuracy
-                    return self._interpolate_correction(correction, current_time)
-
-            # Check for nearby cached predictions
-            logger.info(f"[SCHEDULER] No exact match, checking nearby timestamps...")
-            for offset in [-1, 0, 1, 2]:  # Check nearby seconds
-                check_time = timestamp + offset
-                if check_time in self.prediction_cache:
-                    correction = self.prediction_cache[check_time]
-                    logger.info(f"[SCHEDULER] Found nearby match at timestamp={check_time}, valid={correction.is_valid(current_time)}, source={correction.source}")
+            # FUSION FIX: Check for CPU first (more frequent updates), then GPU
+            for source in ["cpu", "gpu"]:
+                cache_key = (timestamp, source)
+                if cache_key in self.prediction_cache:
+                    correction = self.prediction_cache[cache_key]
+                    logger.info(f"[SCHEDULER] Found exact match at timestamp={timestamp}, source={source}, valid={correction.is_valid(current_time)}")
                     if correction.is_valid(current_time):
                         self.stats['cache_hits'] += 1
                         # CRITICAL: Apply drift-based interpolation for continuous time accuracy
                         return self._interpolate_correction(correction, current_time)
 
+            # Check for nearby cached predictions (both sources)
+            logger.info(f"[SCHEDULER] No exact match, checking nearby timestamps...")
+            for offset in [-1, 0, 1, 2]:  # Check nearby seconds
+                check_time = timestamp + offset
+                for source in ["cpu", "gpu"]:
+                    cache_key = (check_time, source)
+                    if cache_key in self.prediction_cache:
+                        correction = self.prediction_cache[cache_key]
+                        logger.info(f"[SCHEDULER] Found nearby match at timestamp={check_time}, source={source}, valid={correction.is_valid(current_time)}")
+                        if correction.is_valid(current_time):
+                            self.stats['cache_hits'] += 1
+                            # CRITICAL: Apply drift-based interpolation for continuous time accuracy
+                            return self._interpolate_correction(correction, current_time)
+
             # Cache miss - this shouldn't happen with proper scheduling
             self.stats['cache_misses'] += 1
-            cache_keys = sorted(self.prediction_cache.keys())
-            cache_range = f"{cache_keys[0]:.0f} - {cache_keys[-1]:.0f}" if cache_keys else "EMPTY"
+            if self.prediction_cache:
+                # Extract timestamps from tuple keys for range display
+                timestamps = sorted([k[0] for k in self.prediction_cache.keys()])
+                cache_range = f"{timestamps[0]:.0f} - {timestamps[-1]:.0f}"
+            else:
+                cache_range = "EMPTY"
             logger.warning(f"[SCHEDULER] Cache miss for t={current_time:.2f} (timestamp={timestamp}). Cache range: {cache_range}, looking for: {timestamp}")
             return None
     
     def get_fused_correction(self, current_time: float) -> Optional[CorrectionWithBounds]:
         """
         Get fused CPU+GPU correction with temporal weighting
+        FUSION FIX: Use tuple keys to find both CPU and GPU predictions at same timestamp
         """
         logger.info(f"[SCHEDULER] get_fused_correction called: current_time={current_time:.2f}")
         timestamp = math.floor(current_time)
@@ -702,20 +715,47 @@ class PredictiveScheduler:
             cpu_correction = None
             gpu_correction = None
 
-            # Find CPU and GPU predictions for this time
-            for ts, correction in self.prediction_cache.items():
-                if abs(ts - timestamp) <= 1 and correction.is_valid(current_time):
-                    if correction.source == "cpu":
-                        cpu_correction = correction
-                        logger.info(f"[SCHEDULER] Found CPU correction at ts={ts}")
-                    elif correction.source == "gpu":
-                        gpu_correction = correction
-                        logger.info(f"[SCHEDULER] Found GPU correction at ts={ts}")
+            # FUSION FIX: Look for both CPU and GPU predictions using tuple keys
+            # Check exact timestamp first
+            cpu_key = (timestamp, "cpu")
+            gpu_key = (timestamp, "gpu")
+
+            if cpu_key in self.prediction_cache:
+                correction = self.prediction_cache[cpu_key]
+                if correction.is_valid(current_time):
+                    cpu_correction = correction
+                    logger.info(f"[SCHEDULER] Found CPU correction at ts={timestamp}")
+
+            if gpu_key in self.prediction_cache:
+                correction = self.prediction_cache[gpu_key]
+                if correction.is_valid(current_time):
+                    gpu_correction = correction
+                    logger.info(f"[SCHEDULER] Found GPU correction at ts={timestamp}")
+
+            # If not found, check nearby timestamps (±1 second)
+            if not cpu_correction or not gpu_correction:
+                for offset in [-1, 1]:
+                    check_ts = timestamp + offset
+                    if not cpu_correction:
+                        cpu_key = (check_ts, "cpu")
+                        if cpu_key in self.prediction_cache:
+                            correction = self.prediction_cache[cpu_key]
+                            if correction.is_valid(current_time):
+                                cpu_correction = correction
+                                logger.info(f"[SCHEDULER] Found CPU correction at nearby ts={check_ts}")
+
+                    if not gpu_correction:
+                        gpu_key = (check_ts, "gpu")
+                        if gpu_key in self.prediction_cache:
+                            correction = self.prediction_cache[gpu_key]
+                            if correction.is_valid(current_time):
+                                gpu_correction = correction
+                                logger.info(f"[SCHEDULER] Found GPU correction at nearby ts={check_ts}")
 
             # Apply fusion if both available
             logger.info(f"[SCHEDULER] Fusion check: cpu={cpu_correction is not None}, gpu={gpu_correction is not None}, fusion_engine={self.fusion_engine is not None}")
             if cpu_correction and gpu_correction and self.fusion_engine:
-                logger.info("[SCHEDULER] Applying fusion of CPU and GPU predictions")
+                logger.info("[SCHEDULER] ✨ FUSION HAPPENING! Blending CPU and GPU predictions ✨")
 
                 # CRITICAL: Interpolate both predictions BEFORE fusion
                 cpu_interp = self._interpolate_correction(cpu_correction, current_time)
@@ -730,10 +770,14 @@ class PredictiveScheduler:
                 cpu_weight = 1.0 - cpu_progress
                 gpu_weight = cpu_progress
 
+                logger.info(f"[SCHEDULER] Fusion weights: cpu={cpu_weight:.2f}, gpu={gpu_weight:.2f}")
+
                 # Fuse interpolated predictions
-                return self.fusion_engine.fuse_predictions(
+                fused = self.fusion_engine.fuse_predictions(
                     cpu_interp, gpu_interp, cpu_weight, gpu_weight
                 )
+                logger.info(f"[SCHEDULER] ✨ Fusion complete: source={fused.source}, offset={fused.offset_correction*1000:.2f}ms")
+                return fused
 
             # Fallback to available prediction (with interpolation)
             result = cpu_correction or gpu_correction
