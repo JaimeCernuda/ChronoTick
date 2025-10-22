@@ -58,22 +58,30 @@ class NTPOutlierFilter:
     the normalization baseline.
     """
 
-    def __init__(self, window_size: int = 20, sigma_threshold: float = 3.0):
+    def __init__(self, window_size: int = 20, sigma_threshold: float = 5.0, adaptive_alpha: float = 0.1, weak_update_alpha: float = 0.01):
         """
-        Initialize outlier filter.
+        Initialize outlier filter with adaptive baseline tracking.
 
         Args:
             window_size: Number of recent measurements to track
-            sigma_threshold: Z-score threshold (3.0 = 99.7% confidence)
+            sigma_threshold: Z-score threshold (5.0 = 99.9999% confidence) - INCREASED from 3.0
+            adaptive_alpha: EMA alpha for strong updates (accepted measurements)
+            weak_update_alpha: EMA alpha for weak updates (rejected measurements)
         """
         self.measurements = deque(maxlen=window_size)
         self.sigma_threshold = sigma_threshold
         self.rejected_count = 0
         self.accepted_count = 0
 
+        # ADAPTIVE BASELINE: Track EMA of mean and std to prevent death spiral
+        self.adaptive_alpha = adaptive_alpha  # Strong update for accepted measurements
+        self.weak_update_alpha = weak_update_alpha  # Weak update for rejected measurements
+        self.ema_mean = None  # Will be initialized on first measurement
+        self.ema_std = None  # Will be initialized after MIN_SAMPLES
+
     def is_outlier(self, offset_ms: float) -> Tuple[bool, str]:
         """
-        Check if measurement is an outlier.
+        Check if measurement is an outlier using ADAPTIVE baseline.
 
         Returns: (is_outlier, reason_string)
         """
@@ -82,9 +90,15 @@ class NTPOutlierFilter:
         if len(self.measurements) < MIN_SAMPLES:
             return False, f"insufficient_history ({len(self.measurements)}/{MIN_SAMPLES})"
 
-        # Calculate statistics from recent history
-        mean = np.mean(self.measurements)
-        std = np.std(self.measurements)
+        # ADAPTIVE BASELINE: Use EMA mean/std instead of frozen window statistics
+        # Initialize EMA on first check (after MIN_SAMPLES)
+        if self.ema_mean is None:
+            self.ema_mean = np.mean(self.measurements)
+            self.ema_std = max(np.std(self.measurements), 0.001)  # Avoid zero
+
+        # Use EMA baseline for outlier detection
+        mean = self.ema_mean
+        std = self.ema_std
 
         # Avoid division by zero for very stable clocks
         if std < 0.001:  # Less than 1μs variation
@@ -96,19 +110,52 @@ class NTPOutlierFilter:
         is_outlier = z_score > self.sigma_threshold
 
         if is_outlier:
-            reason = f"z={z_score:.2f} (>{self.sigma_threshold}σ), mean={mean:.2f}ms, std={std:.2f}ms"
+            reason = f"z={z_score:.2f} (>{self.sigma_threshold}σ), ema_mean={mean:.2f}ms, ema_std={std:.2f}ms"
             return True, reason
         else:
             return False, f"z={z_score:.2f} (ok)"
 
     def add_measurement(self, offset_ms: float):
-        """Add accepted measurement to history"""
+        """
+        Add accepted measurement to history and update EMA baseline (STRONG update).
+
+        This is called ONLY for accepted measurements and applies a strong EMA update
+        to track the baseline closely.
+        """
         self.measurements.append(offset_ms)
         self.accepted_count += 1
 
-    def record_rejection(self):
-        """Record that a measurement was rejected"""
+        # ADAPTIVE BASELINE: Strong EMA update for accepted measurements
+        if self.ema_mean is not None:
+            # Update EMA mean
+            self.ema_mean = self.adaptive_alpha * offset_ms + (1 - self.adaptive_alpha) * self.ema_mean
+
+            # Update EMA std based on deviation from current mean
+            deviation = abs(offset_ms - self.ema_mean)
+            if self.ema_std is not None:
+                self.ema_std = self.adaptive_alpha * deviation + (1 - self.adaptive_alpha) * self.ema_std
+                self.ema_std = max(self.ema_std, 0.001)  # Minimum std
+
+    def record_rejection(self, offset_ms: float):
+        """
+        Record that a measurement was rejected and apply WEAK EMA update.
+
+        CRITICAL FIX: Even rejected measurements update the baseline weakly
+        to prevent death spiral when clock drifts over sparse NTP intervals.
+        """
         self.rejected_count += 1
+
+        # ADAPTIVE BASELINE: Weak EMA update for rejected measurements
+        # This prevents the baseline from freezing when clock drifts legitimately
+        if self.ema_mean is not None:
+            # Weak update to EMA mean
+            self.ema_mean = self.weak_update_alpha * offset_ms + (1 - self.weak_update_alpha) * self.ema_mean
+
+            # Weak update to EMA std
+            deviation = abs(offset_ms - self.ema_mean)
+            if self.ema_std is not None:
+                self.ema_std = self.weak_update_alpha * deviation + (1 - self.weak_update_alpha) * self.ema_std
+                self.ema_std = max(self.ema_std, 0.001)  # Minimum std
 
     def get_stats(self) -> dict:
         """Get filter statistics with enhanced metrics for test analysis"""
@@ -437,7 +484,7 @@ class NTPClient:
         is_outlier, reason = self.outlier_filter.is_outlier(offset_ms)
 
         if is_outlier:
-            self.outlier_filter.record_rejection()
+            self.outlier_filter.record_rejection(offset_ms)  # CRITICAL FIX: Pass offset for weak EMA update
             logger.warning(f"[OUTLIER_FILTER] ✂️ REJECTED NTP measurement from {best_measurement.server}: "
                           f"offset={offset_ms:.2f}ms - {reason}")
 

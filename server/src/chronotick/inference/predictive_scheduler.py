@@ -195,6 +195,16 @@ class PredictiveScheduler:
         self.fusion_engine = fusion_engine
         self.dataset_manager = dataset_manager  # NEW: For autoregressive feedback
         self.pipeline = pipeline  # NEW: For accessing NTP state (last_ntp_offset, max_multiplier)
+
+        # DIAGNOSTIC: Verify dataset_manager injection (BUG #2 investigation)
+        logger.info(f"[SCHEDULER_INIT] set_model_interfaces called:")
+        logger.info(f"[SCHEDULER_INIT]   - cpu_model: {cpu_model is not None}")
+        logger.info(f"[SCHEDULER_INIT]   - gpu_model: {gpu_model is not None}")
+        logger.info(f"[SCHEDULER_INIT]   - fusion_engine: {fusion_engine is not None}")
+        logger.info(f"[SCHEDULER_INIT]   - dataset_manager: {dataset_manager is not None} (id={id(dataset_manager) if dataset_manager else 'None'})")
+        logger.info(f"[SCHEDULER_INIT]   - pipeline: {pipeline is not None}")
+        logger.info(f"[SCHEDULER_INIT]   - self.dataset_manager after assignment: {self.dataset_manager is not None} (id={id(self.dataset_manager) if self.dataset_manager else 'None'})")
+        logger.info(f"[SCHEDULER_INIT]   - Scheduler instance id: {id(self)}")
     
     def start_scheduler(self):
         """Start the predictive scheduler thread"""
@@ -235,8 +245,11 @@ class PredictiveScheduler:
                 for task in tasks_to_execute:
                     try:
                         # Execute the prediction task
-                        logger.debug(f"Executing prediction task: {task.task_id}")
+                        # DIAGNOSTIC: Track task execution (BUG #3 investigation)
+                        task_type = "GPU" if "gpu_pred" in task.task_id else "CPU" if "cpu_pred" in task.task_id else "NTP"
+                        logger.info(f"[SCHEDULER_TASK] Executing {task_type} task: {task.task_id}")
                         task.task_function(*task.args, **task.kwargs)
+                        logger.info(f"[SCHEDULER_TASK] Completed {task_type} task: {task.task_id}")
 
                     except Exception as e:
                         logger.error(f"Prediction task {task.task_id} failed: {e}")
@@ -302,8 +315,10 @@ class PredictiveScheduler:
         with self.lock:
             heapq.heappush(self.task_queue, task)
             self.stats['predictions_scheduled'] += 1
+            queue_size = len(self.task_queue)
 
-        logger.debug(f"Scheduled GPU prediction for t={target_time} (exec at t={execution_time})")
+        # DIAGNOSTIC: Track GPU task scheduling (BUG #3 investigation)
+        logger.info(f"[SCHEDULER_TASK] Scheduled GPU prediction: target_time={target_time:.0f}, exec_time={execution_time:.0f}, queue_size={queue_size}")
 
     def _schedule_ntp_check(self, check_time: float):
         """
@@ -418,8 +433,25 @@ class PredictiveScheduler:
                 # This ensures model trains on recent predictions, not just NTP
                 # IMPORTANT: Store UNCAPPED predictions so model learns from its actual output
                 # Capping is only for safety when serving to clients (cache above)
-                if self.dataset_manager:
-                    self.dataset_manager.add_prediction(
+                # DIAGNOSTIC: Log dataset_manager state (BUG #2 investigation)
+                if i == 0:  # Only log on first prediction to avoid spam
+                    logger.info(f"[SCHEDULER_DATASET_DEBUG] dataset_manager check:")
+                    logger.info(f"[SCHEDULER_DATASET_DEBUG]   - self.dataset_manager is not None: {self.dataset_manager is not None}")
+                    logger.info(f"[SCHEDULER_DATASET_DEBUG]   - id(self.dataset_manager): {id(self.dataset_manager) if self.dataset_manager else 'None'}")
+                    logger.info(f"[SCHEDULER_DATASET_DEBUG]   - Scheduler instance id: {id(self)}")
+                    if self.pipeline and hasattr(self.pipeline, 'dataset_manager'):
+                        logger.info(f"[SCHEDULER_DATASET_DEBUG]   - pipeline.dataset_manager: {self.pipeline.dataset_manager is not None}")
+                        logger.info(f"[SCHEDULER_DATASET_DEBUG]   - id(pipeline.dataset_manager): {id(self.pipeline.dataset_manager) if self.pipeline.dataset_manager else 'None'}")
+
+                # CRITICAL FIX (BUG #2): Fallback to pipeline.dataset_manager if self.dataset_manager is None
+                dataset_mgr = self.dataset_manager
+                if dataset_mgr is None and self.pipeline and hasattr(self.pipeline, 'dataset_manager'):
+                    dataset_mgr = self.pipeline.dataset_manager
+                    if i == 0:
+                        logger.warning(f"[SCHEDULER_DATASET_DEBUG] Using fallback: pipeline.dataset_manager (self.dataset_manager was None)")
+
+                if dataset_mgr:
+                    dataset_mgr.add_prediction(
                         timestamp=timestamp,
                         offset=pred.offset,  # Use UNCAPPED offset for training
                         drift=pred.drift,
@@ -452,11 +484,14 @@ class PredictiveScheduler:
     def _execute_gpu_prediction(self, start_time: float, end_time: float):
         """Execute GPU model prediction and cache results"""
         try:
+            # DIAGNOSTIC: Track GPU execution (BUG #3 investigation)
+            logger.info(f"[SCHEDULER_TASK] _execute_gpu_prediction ENTRY: start_time={start_time:.0f}, end_time={end_time:.0f}, gpu_model={self.gpu_model is not None}")
+
             if not self.gpu_model:
-                logger.error("GPU model not available")
+                logger.error("[SCHEDULER_TASK] GPU model not available")
                 return
 
-            logger.debug(f"Executing GPU prediction for t={start_time}-{end_time}")
+            logger.info(f"[SCHEDULER_TASK] Executing GPU prediction for t={start_time:.0f}-{end_time:.0f}")
 
             # Make GPU prediction
             gpu_prediction = self.gpu_model.predict_with_uncertainty(
@@ -489,8 +524,15 @@ class PredictiveScheduler:
                 # This ensures model trains on recent predictions, not just NTP
                 # IMPORTANT: Store UNCAPPED predictions so model learns from its actual output
                 # Capping is only for safety when serving to clients (cache above)
-                if self.dataset_manager:
-                    self.dataset_manager.add_prediction(
+                # CRITICAL FIX (BUG #2): Fallback to pipeline.dataset_manager if self.dataset_manager is None
+                dataset_mgr = self.dataset_manager
+                if dataset_mgr is None and self.pipeline and hasattr(self.pipeline, 'dataset_manager'):
+                    dataset_mgr = self.pipeline.dataset_manager
+                    if i == 0:
+                        logger.warning(f"[SCHEDULER_DATASET_DEBUG] GPU: Using fallback: pipeline.dataset_manager (self.dataset_manager was None)")
+
+                if dataset_mgr:
+                    dataset_mgr.add_prediction(
                         timestamp=timestamp,
                         offset=pred.offset,  # Use UNCAPPED offset for training
                         drift=pred.drift,
