@@ -61,10 +61,12 @@ def test_ntp_connection(server_ip, port=123, timeout=5):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python3 test_ntp_connectivity.py <proxy_ip>")
+        print("Usage: python3 test_ntp_connectivity.py <proxy_ip> [port]")
+        print("  port defaults to 123 if not specified")
         sys.exit(1)
 
     proxy_ip = sys.argv[1]
+    port = int(sys.argv[2]) if len(sys.argv) > 2 else 123
 
     # Get local hostname/IP
     hostname = socket.gethostname()
@@ -76,6 +78,6 @@ if __name__ == "__main__":
     print(f"\nLocal machine: {hostname} ({local_ip})")
 
     # Test connectivity
-    success = test_ntp_connection(proxy_ip)
+    success = test_ntp_connection(proxy_ip, port)
 
     sys.exit(0 if success else 1)

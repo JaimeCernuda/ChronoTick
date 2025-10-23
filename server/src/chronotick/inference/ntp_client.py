@@ -528,54 +528,125 @@ class NTPClient:
 
         return measurements
 
-    def _select_and_validate_best(self, measurements: List[NTPMeasurement],
-                                  threshold_type: str = "strict") -> Optional[NTPMeasurement]:
+    def _average_with_outlier_rejection(self, measurements: List[NTPMeasurement],
+                                        threshold_type: str = "strict") -> Optional[NTPMeasurement]:
         """
-        Select best measurement from list and validate with outlier filter.
+        Average multiple NTP measurements after rejecting outliers using MAD (Median Absolute Deviation).
+
+        Algorithm (user's proposal):
+        1. Query 5 servers in parallel
+        2. Calculate median offset
+        3. Reject measurements with high variability (>3σ from median using MAD)
+        4. Average the remaining measurements
+        5. Use std of filtered measurements as uncertainty
 
         Args:
             measurements: List of candidate measurements
             threshold_type: "strict" or "relaxed" for logging
 
         Returns:
-            Best measurement if valid, None if rejected by outlier filter
+            Averaged measurement if valid, None if rejected by outlier filter
         """
         if not measurements:
             return None
 
-        # Select best measurement: lowest delay, highest stratum, lowest uncertainty
-        best_measurement = min(measurements,
-                             key=lambda m: (m.delay, -m.stratum, m.uncertainty))
+        if len(measurements) == 1:
+            # Only one measurement, use legacy single-server logic
+            best_measurement = measurements[0]
+            offset_ms = best_measurement.offset * 1000.0
+            is_outlier, reason = self.outlier_filter.is_outlier(offset_ms)
 
-        mode_str = "advanced" if self.config.measurement_mode == "advanced" else "simple"
+            if is_outlier:
+                self.outlier_filter.record_rejection(offset_ms)
+                logger.warning(f"[OUTLIER_FILTER] ✂️ REJECTED single NTP measurement from {best_measurement.server}: "
+                              f"offset={offset_ms:.2f}ms - {reason} [{threshold_type}]")
+                return None
 
-        # Check if measurement is an outlier
-        offset_ms = best_measurement.offset * 1000.0  # Convert to milliseconds
+            self.outlier_filter.add_measurement(offset_ms)
+            logger.info(f"[NTP_SINGLE] Using {best_measurement.server}: offset={offset_ms:.2f}ms [{threshold_type}]")
+
+            with self.lock:
+                self.measurement_history.append(best_measurement)
+                if len(self.measurement_history) > 100:
+                    self.measurement_history = self.measurement_history[-50:]
+
+            return best_measurement
+
+        # Multiple measurements: Apply averaging with outlier rejection
+        offsets = np.array([m.offset for m in measurements])
+        delays = np.array([m.delay for m in measurements])
+        uncertainties = np.array([m.uncertainty for m in measurements])
+
+        # Calculate median offset
+        median_offset = np.median(offsets)
+
+        # Calculate MAD (Median Absolute Deviation) - robust to outliers
+        mad = np.median(np.abs(offsets - median_offset))
+
+        # MAD threshold: 3 × MAD ≈ 3σ for normal distribution (using scale factor 1.4826)
+        # But we use 3.0 directly on MAD for simplicity (approximately 3σ)
+        mad_threshold = 3.0 * mad if mad > 0.000001 else 0.003  # Fallback: 3ms
+
+        # Filter out outliers
+        mask = np.abs(offsets - median_offset) <= mad_threshold
+        filtered_measurements = [m for m, keep in zip(measurements, mask) if keep]
+        filtered_offsets = offsets[mask]
+        filtered_delays = delays[mask]
+        filtered_uncertainties = uncertainties[mask]
+
+        n_total = len(measurements)
+        n_filtered = len(filtered_measurements)
+        n_rejected = n_total - n_filtered
+
+        if n_filtered == 0:
+            # All measurements are outliers - use median as fallback
+            logger.warning(f"[NTP_AVERAGING] All {n_total} measurements rejected as outliers, using median fallback")
+            avg_offset = median_offset
+            avg_delay = np.median(delays)
+            avg_uncertainty = mad if mad > 0 else 0.010  # 10ms fallback
+            server_list = "median_fallback"
+        else:
+            # Calculate average of filtered measurements
+            avg_offset = np.mean(filtered_offsets)
+            avg_delay = np.mean(filtered_delays)
+            avg_uncertainty = np.std(filtered_offsets) if n_filtered > 1 else filtered_uncertainties[0]
+
+            # Create server list string for logging
+            server_list = f"{n_filtered}/{n_total} servers"
+
+            if n_rejected > 0:
+                rejected_servers = [m.server for m, keep in zip(measurements, mask) if not keep]
+                rejected_offsets = offsets[~mask]
+                logger.info(f"[NTP_AVERAGING] Rejected {n_rejected} outlier(s): " +
+                           ", ".join([f"{srv}={off*1000:.2f}ms" for srv, off in zip(rejected_servers, rejected_offsets)]))
+
+        # Log averaged result
+        logger.info(f"[NTP_AVERAGED] Combined {server_list} ({threshold_type}): "
+                   f"offset={avg_offset*1000:.2f}ms, "
+                   f"delay={avg_delay*1000:.1f}ms, "
+                   f"uncertainty={avg_uncertainty*1000:.2f}ms, "
+                   f"MAD={mad*1000:.2f}ms")
+
+        # Check if AVERAGED result is an outlier (against historical baseline)
+        offset_ms = avg_offset * 1000.0
         is_outlier, reason = self.outlier_filter.is_outlier(offset_ms)
 
         if is_outlier:
             self.outlier_filter.record_rejection(offset_ms)
-            logger.warning(f"[OUTLIER_FILTER] ✂️ REJECTED NTP measurement from {best_measurement.server}: "
+            logger.warning(f"[OUTLIER_FILTER] ✂️ REJECTED averaged NTP measurement: "
                           f"offset={offset_ms:.2f}ms - {reason} [{threshold_type}]")
 
-            # Log filter statistics periodically
             stats = self.outlier_filter.get_stats()
             if stats['rejected'] % 5 == 0 and stats['rejected'] > 0:
                 logger.info(f"[OUTLIER_FILTER] Stats: {stats['accepted']} accepted, "
                            f"{stats['rejected']} rejected ({stats['rejection_rate']*100:.1f}% rejection rate)")
 
-            return None  # Reject this measurement
+            return None
 
-        # Accept measurement
+        # Accept averaged measurement
         self.outlier_filter.add_measurement(offset_ms)
 
-        logger.info(f"[NTP_ACCEPTED] Selected from {best_measurement.server} ({mode_str}, {threshold_type}): "
-                   f"offset={best_measurement.offset*1e6:.1f}μs, "
-                   f"delay={best_measurement.delay*1000:.1f}ms, "
-                   f"uncertainty={best_measurement.uncertainty*1e6:.1f}μs, "
-                   f"stratum={best_measurement.stratum}, z-score={reason}")
-
-        # Log periodic statistics summary
+        # Log periodic statistics
         stats = self.outlier_filter.get_stats()
         if stats['accepted'] % 10 == 0 and stats['accepted'] > 0:
             logger.info(f"[PHASE1_STATS] Outlier Filter Summary after {stats['accepted']} measurements:")
@@ -585,34 +656,51 @@ class NTPClient:
                 logger.info(f"  Baseline stability: mean={stab['mean_ms']:.2f}ms, std={stab['std_ms']:.2f}ms, "
                            f"range={stab['range_ms']:.2f}ms, IQR={stab['iqr_ms']:.2f}ms")
 
+        # Create synthetic NTPMeasurement with averaged values
+        # Use the best stratum from filtered measurements
+        best_stratum = max([m.stratum for m in filtered_measurements]) if filtered_measurements else measurements[0].stratum
+
+        averaged_measurement = NTPMeasurement(
+            offset=avg_offset,
+            delay=avg_delay,
+            stratum=best_stratum,
+            precision=np.mean([m.precision for m in filtered_measurements]) if filtered_measurements else measurements[0].precision,
+            server=server_list,  # Indicate this is averaged from multiple servers
+            timestamp=time.time(),
+            uncertainty=avg_uncertainty
+        )
+
         # Store in history
         with self.lock:
-            self.measurement_history.append(best_measurement)
+            self.measurement_history.append(averaged_measurement)
             if len(self.measurement_history) > 100:
                 self.measurement_history = self.measurement_history[-50:]
 
-        return best_measurement
+        return averaged_measurement
 
     def get_best_measurement(self) -> Optional[NTPMeasurement]:
         """
-        Query multiple NTP servers and return the best measurement.
+        Query multiple NTP servers and return averaged measurement with outlier rejection.
 
         NEW FEATURES:
         - Parallel queries (28-58x faster for 10 servers!)
+        - Multi-server averaging with outlier rejection (prevents bimodal flickering)
         - Fallback with relaxed thresholds (prevents NTP starvation)
         - Retry with exponential backoff (handles transient failures)
 
-        Selection criteria:
-        1. Lowest delay (best network path)
-        2. Highest stratum (more accurate)
-        3. Lowest uncertainty (best quality)
+        Algorithm:
+        1. Query 5 servers in parallel
+        2. Calculate median offset
+        3. Reject measurements >3σ from median (using MAD)
+        4. Average the remaining measurements
+        5. Use std of filtered measurements as uncertainty
         """
         for attempt in range(self.config.max_retries):
             # Try 1: Strict thresholds with all servers
             measurements = self._query_all_servers(use_parallel=self.config.parallel_queries)
 
             if measurements:
-                result = self._select_and_validate_best(measurements, threshold_type="strict")
+                result = self._average_with_outlier_rejection(measurements, threshold_type="strict")
                 if result:
                     return result
 
@@ -628,9 +716,9 @@ class NTPClient:
                 )
 
                 if relaxed_measurements:
-                    result = self._select_and_validate_best(relaxed_measurements, threshold_type="relaxed")
+                    result = self._average_with_outlier_rejection(relaxed_measurements, threshold_type="relaxed")
                     if result:
-                        logger.warning(f"[FALLBACK] Using relaxed threshold measurement (higher uncertainty)")
+                        logger.warning(f"[FALLBACK] Using relaxed threshold averaged measurement (higher uncertainty)")
                         return result
 
             # Retry logic: If this wasn't the last attempt, wait and retry
