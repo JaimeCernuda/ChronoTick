@@ -34,15 +34,22 @@ class BroadcastPattern:
         'very_slow': 0.500,      # 500ms - large gaps
     }
 
-    def __init__(self, pattern_config: List[str]):
+    def __init__(self, pattern_config: List[str], fixed_delay: float = None):
         """
         pattern_config: List like ['slow', 'fast', 'fast', 'medium', ...]
+        fixed_delay: If set, overrides pattern and uses this fixed delay between events
         """
-        self.pattern = [self.PATTERNS[p + '_stream'] for p in pattern_config]
+        self.fixed_delay = fixed_delay
+        if fixed_delay is None:
+            self.pattern = [self.PATTERNS[p + '_stream'] for p in pattern_config]
+        else:
+            self.pattern = [fixed_delay]  # Single fixed delay
         self.index = 0
 
     def get_next_delay(self) -> float:
         """Get next delay in seconds"""
+        if self.fixed_delay is not None:
+            return self.fixed_delay
         delay = self.pattern[self.index % len(self.pattern)]
         self.index += 1
         return delay
@@ -204,6 +211,8 @@ def main():
                        help='Output CSV file')
     parser.add_argument('--pattern', type=str, default='slow,fast,fast,fast,fast,medium',
                        help='Broadcast pattern (comma-separated: slow,fast,medium)')
+    parser.add_argument('--target-duration', type=float, default=None,
+                       help='Target duration in seconds to spread events over (overrides pattern delays)')
     parser.add_argument('--ntp-server', type=str, default=None,
                        help='NTP server(s) for coordinator timestamps (comma-separated)')
     parser.add_argument('--chronotick-server', type=str, default=None,
@@ -222,7 +231,13 @@ def main():
 
     # Create pattern
     pattern_list = args.pattern.split(',')
-    pattern = BroadcastPattern(pattern_list)
+    fixed_delay = None
+    if args.target_duration:
+        # Calculate fixed delay to spread events over target duration
+        fixed_delay = args.target_duration / args.num_events
+        print(f"Target duration: {args.target_duration}s for {args.num_events} events")
+        print(f"Using fixed delay: {fixed_delay:.2f}s per event")
+    pattern = BroadcastPattern(pattern_list, fixed_delay=fixed_delay)
 
     # Create and run coordinator
     coordinator = Coordinator(
