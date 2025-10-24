@@ -221,6 +221,18 @@ class TimesFMModel(BaseTimeSeriesModel):
 
             logger.debug(f"TimesFM 2.5 returned forecasts successfully")
 
+            # Log quantile_forecast details for debugging uncertainty bug
+            logger.info(f"[TIMESFM_QUANTILES] quantile_forecast is None: {quantile_forecast is None}")
+            logger.info(f"[TIMESFM_QUANTILES] quantile_forecast type: {type(quantile_forecast)}")
+            if quantile_forecast is not None:
+                if isinstance(quantile_forecast, dict):
+                    logger.info(f"[TIMESFM_QUANTILES] quantile_forecast keys: {list(quantile_forecast.keys())}")
+                    logger.info(f"[TIMESFM_QUANTILES] quantile_forecast length: {len(quantile_forecast)}")
+                else:
+                    logger.info(f"[TIMESFM_QUANTILES] quantile_forecast shape/len: {quantile_forecast.shape if hasattr(quantile_forecast, 'shape') else len(quantile_forecast)}")
+            else:
+                logger.error(f"[TIMESFM_QUANTILES] ❌ TimesFM returned quantile_forecast=None despite use_continuous_quantile_head=True!")
+
             # Extract predictions from output
             # point_forecast is a list/array of predictions
             if isinstance(point_forecast, list) and len(point_forecast) > 0:
