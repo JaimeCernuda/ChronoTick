@@ -198,7 +198,7 @@ log_info "━━━━━━━━━━━━━━━━━━━━━━━�
 # Worker B
 log_info "Starting Worker B on $WORKER_B_NODE..."
 WORKER_B_LOG="$BASE_DIR/$LOGS_DIR/worker_comp11.log"
-ssh $WORKER_B_NODE "cd $BASE_DIR && nohup ~/.local/bin/uv run worker \
+ssh $WORKER_B_NODE "cd $BASE_DIR && nohup .venv/bin/worker \
     --node-id comp11 \
     --listen-port $WORKER_PORT \
     --ntp-server $NTP_SERVER \
@@ -212,7 +212,7 @@ sleep 2
 # Worker C
 log_info "Starting Worker C on $WORKER_C_NODE..."
 WORKER_C_LOG="$BASE_DIR/$LOGS_DIR/worker_comp12.log"
-ssh $WORKER_C_NODE "cd $BASE_DIR && nohup ~/.local/bin/uv run worker \
+ssh $WORKER_C_NODE "cd $BASE_DIR && nohup .venv/bin/worker \
     --node-id comp12 \
     --listen-port $WORKER_PORT \
     --ntp-server $NTP_SERVER \
@@ -296,7 +296,7 @@ log_info "Running coordinator on $COORDINATOR_NODE..."
 log_info "(This will take approximately ${TEST_DURATION_MINUTES} minutes)"
 echo
 
-ssh $COORDINATOR_NODE "cd $BASE_DIR && ~/.local/bin/uv run coordinator \
+ssh $COORDINATOR_NODE "cd $BASE_DIR && .venv/bin/coordinator \
     --workers $WORKER_B_NODE:$WORKER_PORT,$WORKER_C_NODE:$WORKER_PORT \
     --num-events $NUM_EVENTS \
     --pattern $CUSTOM_PATTERN \
@@ -406,7 +406,7 @@ log_info "━━━━━━━━━━━━━━━━━━━━━━━�
 
 if [ -f "analysis/generate_all_figures.py" ]; then
     log_info "Running analysis..."
-    if uv run python analysis/generate_all_figures.py --experiment "$EXPERIMENT_NAME" 2>&1 | tee "$LOGS_DIR/analysis.log"; then
+    if .venv/bin/python analysis/generate_all_figures.py --experiment "$EXPERIMENT_NAME" 2>&1 | tee "$LOGS_DIR/analysis.log"; then
         log_info "✓ Analysis complete!"
         log_info "  Figures: $RESULTS_DIR/figures/"
         log_info "  Statistics: $RESULTS_DIR/statistics/"
