@@ -111,8 +111,8 @@ class Worker:
                  node_id: str,
                  listen_port: int,
                  ntp_server: str,
-                 chronotick_server: str,
-                 output_file: Path,
+                 chronotick_server: Optional[str] = None,
+                 output_file: Path = None,
                  commit_wait_delays: list[int] = [30, 60]):
 
         self.node_id = node_id
@@ -128,17 +128,25 @@ class Worker:
         ntp_servers = ntp_server.split(',')
         self.ntp_client = NTPClient(ntp_servers)
 
-        self.logger.info(f"Initializing ChronoTick client (server: {chronotick_server})...")
-        self.chronotick_client = ChronoTickClient(chronotick_server)
+        # ChronoTick client (optional)
+        self.chronotick_client = None
+        self.commit_wait = None
+        if chronotick_server:
+            self.logger.info(f"Initializing ChronoTick client (server: {chronotick_server})...")
+            self.chronotick_client = ChronoTickClient(chronotick_server)
 
-        # Commit-wait tracker
-        self.logger.info(f"Initializing commit-wait tracker (delays: {commit_wait_delays}s)...")
-        self.commit_wait = CommitWaitTracker(self.chronotick_client, commit_wait_delays)
+            # Commit-wait tracker
+            self.logger.info(f"Initializing commit-wait tracker (delays: {commit_wait_delays}s)...")
+            self.commit_wait = CommitWaitTracker(self.chronotick_client, commit_wait_delays)
+        else:
+            self.logger.info("ChronoTick disabled - system clock only mode")
 
         # CSV output
         self.output_file.parent.mkdir(parents=True, exist_ok=True)
         self.csv_file = open(self.output_file, 'w', newline='')
-        self.csv_writer = csv.DictWriter(self.csv_file, fieldnames=[
+
+        # Base fieldnames (always present)
+        fieldnames = [
             'event_id',
             'node_id',
             'sequence_number',
@@ -147,14 +155,21 @@ class Worker:
             'ntp_offset_ms',
             'ntp_uncertainty_ms',
             'ntp_timestamp_ns',
-            'ct_offset_ms',
-            'ct_uncertainty_ms',
-            'ct_timestamp_ns',
-            'ct_lower_bound_ns',
-            'ct_upper_bound_ns',
-            'ct_uncertainty_30s_ms',
-            'ct_uncertainty_60s_ms',
-        ])
+        ]
+
+        # Add ChronoTick fields if enabled
+        if self.chronotick_client:
+            fieldnames.extend([
+                'ct_offset_ms',
+                'ct_uncertainty_ms',
+                'ct_timestamp_ns',
+                'ct_lower_bound_ns',
+                'ct_upper_bound_ns',
+                'ct_uncertainty_30s_ms',
+                'ct_uncertainty_60s_ms',
+            ])
+
+        self.csv_writer = csv.DictWriter(self.csv_file, fieldnames=fieldnames)
         self.csv_writer.writeheader()
         self.csv_file.flush()
 
@@ -179,13 +194,16 @@ class Worker:
         self.running = False
 
     def _warmup(self):
-        """Warmup ChronoTick and NTP for 3 minutes"""
+        """Warmup NTP (and ChronoTick if enabled) for 3 minutes"""
         self.logger.info("="*60)
-        self.logger.info("WARMUP PHASE: Initializing ChronoTick and NTP")
-        self.logger.info("Duration: 180 seconds (3 minutes)")
+        if self.chronotick_client:
+            self.logger.info("WARMUP PHASE: Initializing ChronoTick and NTP")
+        else:
+            self.logger.info("WARMUP PHASE: Initializing NTP (ChronoTick disabled)")
+        self.logger.info("Duration: 60 seconds (1 minute)")
         self.logger.info("="*60)
 
-        warmup_duration = 180  # 3 minutes
+        warmup_duration = 60  # 1 minute (reduced for system clock tests)
         query_interval = 10  # Query every 10 seconds
 
         for elapsed in range(0, warmup_duration, query_interval):
@@ -202,15 +220,16 @@ class Worker:
             except Exception as e:
                 self.logger.warning(f"Warmup [{elapsed:3d}s]: NTP query failed: {e}")
 
-            try:
-                # Query ChronoTick
-                ct_offset, ct_uncertainty = self.chronotick_client.query()
-                self.logger.info(
-                    f"Warmup [{elapsed:3d}s]: ChronoTick offset={ct_offset:+7.2f}ms, "
-                    f"uncertainty={ct_uncertainty:5.2f}ms"
-                )
-            except Exception as e:
-                self.logger.warning(f"Warmup [{elapsed:3d}s]: ChronoTick query failed: {e}")
+            if self.chronotick_client:
+                try:
+                    # Query ChronoTick
+                    ct_offset, ct_uncertainty = self.chronotick_client.query()
+                    self.logger.info(
+                        f"Warmup [{elapsed:3d}s]: ChronoTick offset={ct_offset:+7.2f}ms, "
+                        f"uncertainty={ct_uncertainty:5.2f}ms"
+                    )
+                except Exception as e:
+                    self.logger.warning(f"Warmup [{elapsed:3d}s]: ChronoTick query failed: {e}")
 
             time.sleep(query_interval)
 
@@ -225,19 +244,10 @@ class Worker:
             # Query NTP (cached for 10s)
             ntp_offset_ms, ntp_uncertainty_ms = self.ntp_client.query()
 
-            # Query ChronoTick (fresh every time)
-            ct_offset_ms, ct_uncertainty_ms = self.chronotick_client.query()
-
-            # Calculate timestamps
+            # Calculate NTP timestamp
             ntp_timestamp_ns = receive_time_ns + int(ntp_offset_ms * 1_000_000)
-            ct_timestamp_ns = receive_time_ns + int(ct_offset_ms * 1_000_000)
-            ct_lower_ns = ct_timestamp_ns - int(3 * ct_uncertainty_ms * 1_000_000)
-            ct_upper_ns = ct_timestamp_ns + int(3 * ct_uncertainty_ms * 1_000_000)
 
-            # Schedule commit-wait measurements
-            self.commit_wait.schedule(event.event_id, ct_uncertainty_ms)
-
-            # Create record (commit-wait results will be added later)
+            # Base record with NTP data
             record = {
                 'event_id': event.event_id,
                 'node_id': self.node_id,
@@ -247,14 +257,31 @@ class Worker:
                 'ntp_offset_ms': ntp_offset_ms,
                 'ntp_uncertainty_ms': ntp_uncertainty_ms,
                 'ntp_timestamp_ns': ntp_timestamp_ns,
-                'ct_offset_ms': ct_offset_ms,
-                'ct_uncertainty_ms': ct_uncertainty_ms,
-                'ct_timestamp_ns': ct_timestamp_ns,
-                'ct_lower_bound_ns': ct_lower_ns,
-                'ct_upper_bound_ns': ct_upper_ns,
-                'ct_uncertainty_30s_ms': None,  # Will be filled by commit-wait
-                'ct_uncertainty_60s_ms': None,
             }
+
+            # Add ChronoTick data if enabled
+            if self.chronotick_client:
+                # Query ChronoTick (fresh every time)
+                ct_offset_ms, ct_uncertainty_ms = self.chronotick_client.query()
+
+                # Calculate ChronoTick timestamps
+                ct_timestamp_ns = receive_time_ns + int(ct_offset_ms * 1_000_000)
+                ct_lower_ns = ct_timestamp_ns - int(3 * ct_uncertainty_ms * 1_000_000)
+                ct_upper_ns = ct_timestamp_ns + int(3 * ct_uncertainty_ms * 1_000_000)
+
+                # Schedule commit-wait measurements
+                self.commit_wait.schedule(event.event_id, ct_uncertainty_ms)
+
+                # Add ChronoTick fields to record
+                record.update({
+                    'ct_offset_ms': ct_offset_ms,
+                    'ct_uncertainty_ms': ct_uncertainty_ms,
+                    'ct_timestamp_ns': ct_timestamp_ns,
+                    'ct_lower_bound_ns': ct_lower_ns,
+                    'ct_upper_bound_ns': ct_upper_ns,
+                    'ct_uncertainty_30s_ms': None,  # Will be filled by commit-wait
+                    'ct_uncertainty_60s_ms': None,
+                })
 
             # Write to CSV
             self.csv_writer.writerow(record)
@@ -264,11 +291,17 @@ class Worker:
 
             # Log progress
             if self.events_processed % 10 == 0:
-                self.logger.info(
-                    f"Progress: {self.events_processed} events processed | "
-                    f"NTP: {ntp_offset_ms:+.2f}±{ntp_uncertainty_ms:.2f}ms | "
-                    f"ChronoTick: {ct_offset_ms:+.2f}±{ct_uncertainty_ms:.2f}ms"
-                )
+                if self.chronotick_client:
+                    self.logger.info(
+                        f"Progress: {self.events_processed} events processed | "
+                        f"NTP: {ntp_offset_ms:+.2f}±{ntp_uncertainty_ms:.2f}ms | "
+                        f"ChronoTick: {record['ct_offset_ms']:+.2f}±{record['ct_uncertainty_ms']:.2f}ms"
+                    )
+                else:
+                    self.logger.info(
+                        f"Progress: {self.events_processed} events processed | "
+                        f"NTP: {ntp_offset_ms:+.2f}±{ntp_uncertainty_ms:.2f}ms"
+                    )
 
         except Exception as e:
             self.logger.error(f"Failed to process event {event.event_id}: {e}", exc_info=True)
@@ -320,15 +353,18 @@ class Worker:
         self.logger.info(f"Success rate: {self.events_processed/max(1, self.events_received)*100:.1f}%")
         self.logger.info("="*60)
 
-        # Wait for commit-wait measurements to complete
-        self.logger.info("Waiting for commit-wait measurements to complete (90s)...")
-        time.sleep(90)
+        # Wait for commit-wait measurements to complete (if ChronoTick enabled)
+        if self.commit_wait:
+            self.logger.info("Waiting for commit-wait measurements to complete (90s)...")
+            time.sleep(90)
 
-        # Update CSV with commit-wait results
-        self._update_commit_wait_results()
+            # Update CSV with commit-wait results
+            self._update_commit_wait_results()
+
+            # Stop commit-wait tracker
+            self.commit_wait.stop()
 
         # Cleanup
-        self.commit_wait.stop()
         self.csv_file.close()
         self.listener.close()
 
@@ -360,8 +396,8 @@ def main():
                        help='UDP port to listen on')
     parser.add_argument('--ntp-server', type=str, required=True,
                        help='NTP server(s) (comma-separated)')
-    parser.add_argument('--chronotick-server', type=str, required=True,
-                       help='ChronoTick server URL')
+    parser.add_argument('--chronotick-server', type=str, required=False, default=None,
+                       help='ChronoTick server URL (optional - omit for system clock only tests)')
     parser.add_argument('--output', type=Path, required=True,
                        help='Output CSV file')
     parser.add_argument('--log-file', type=Path, default=None,
