@@ -127,6 +127,15 @@ class TSFMModelWrapper:
                 logger.warning(f"{self.model_type} model returned None (insufficient data) - returning empty predictions")
                 return []
 
+            # Log quantile/uncertainty info from prediction_result
+            logger.info(f"[UNCERTAINTY_CHECK] {self.model_type} prediction_result:")
+            logger.info(f"[UNCERTAINTY_CHECK]   - has uncertainty attr: {hasattr(prediction_result, 'uncertainty')}")
+            logger.info(f"[UNCERTAINTY_CHECK]   - uncertainty is None: {prediction_result.uncertainty is None if hasattr(prediction_result, 'uncertainty') else 'N/A'}")
+            logger.info(f"[UNCERTAINTY_CHECK]   - has quantiles attr: {hasattr(prediction_result, 'quantiles')}")
+            logger.info(f"[UNCERTAINTY_CHECK]   - quantiles is None: {prediction_result.quantiles is None if hasattr(prediction_result, 'quantiles') else 'N/A'}")
+            if hasattr(prediction_result, 'quantiles') and prediction_result.quantiles is not None:
+                logger.info(f"[UNCERTAINTY_CHECK]   - quantiles keys: {list(prediction_result.quantiles.keys())}")
+
             # Convert PredictionResult to List[PredictionWithUncertainty]
             logger.debug(f"Converting prediction result to list...")
             predictions = self._convert_prediction_result(prediction_result, horizon)
@@ -313,12 +322,21 @@ class TSFMModelWrapper:
                 if drift_source == "ntp_calc":
                     logger.info(f"  → Phase 3 Impact: Using real NTP-calculated drift rate")
 
-            # Get uncertainty
+            # Get uncertainty - CRITICAL FOR UNCERTAINTY QUANTIFICATION
             if prediction_result.uncertainty is not None and i < len(prediction_result.uncertainty):
                 offset_uncertainty = float(prediction_result.uncertainty[i])
+                if i == 0:  # Log first prediction only
+                    logger.info(f"[UNCERTAINTY] ✅ Model provided uncertainty: {offset_uncertainty*1000:.3f}ms")
             else:
-                # Default uncertainty if not available
-                offset_uncertainty = 0.001  # 1ms default
+                # CRITICAL ERROR: Model must provide uncertainty for proper uncertainty quantification
+                # Silent fallback was causing all uncertainties to be 1.0ms (see UNCERTAINTY_BUG_DEEPER_ROOT_CAUSE.md)
+                if i == 0:  # Log once per prediction call
+                    logger.error(f"[UNCERTAINTY] ❌ CRITICAL: {self.model_type} model returned NO UNCERTAINTY!")
+                    logger.error(f"[UNCERTAINTY] prediction_result.uncertainty = {prediction_result.uncertainty}")
+                    logger.error(f"[UNCERTAINTY] This indicates quantile prediction is not enabled in the model")
+                    logger.error(f"[UNCERTAINTY] See UNCERTAINTY_BUG_DEEPER_ROOT_CAUSE.md for fix instructions")
+                    logger.error(f"[UNCERTAINTY] Falling back to 1.0ms (THIS IS WRONG AND MUST BE FIXED!)")
+                offset_uncertainty = 0.001  # 1ms fallback - THIS SHOULD NOT HAPPEN
 
             # Drift uncertainty (approximate as 10% of offset uncertainty)
             drift_uncertainty = offset_uncertainty * 0.1
