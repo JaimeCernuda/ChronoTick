@@ -61,7 +61,7 @@ log_debug() {
 
 check_node() {
     local node=$1
-    if ssh ares "ssh $node 'echo ok'" &>/dev/null; then
+    if ssh $node 'echo ok' &>/dev/null; then
         return 0
     else
         return 1
@@ -70,9 +70,9 @@ check_node() {
 
 kill_processes() {
     log_debug "Cleaning up existing processes..."
-    ssh ares "ssh $COORDINATOR_NODE 'pkill -f \"uv run coordinator\" || pkill -f coordinator.py || true'" &>/dev/null
-    ssh ares "ssh $WORKER_B_NODE 'pkill -f \"uv run worker\" || pkill -f worker.py || true'" &>/dev/null
-    ssh ares "ssh $WORKER_C_NODE 'pkill -f \"uv run worker\" || pkill -f worker.py || true'" &>/dev/null
+    ssh $COORDINATOR_NODE 'pkill -f "uv run coordinator" || pkill -f coordinator.py || true' &>/dev/null
+    ssh $WORKER_B_NODE 'pkill -f "uv run worker" || pkill -f worker.py || true' &>/dev/null
+    ssh $WORKER_C_NODE 'pkill -f "uv run worker" || pkill -f worker.py || true' &>/dev/null
     sleep 2
 }
 
@@ -85,7 +85,7 @@ wait_for_warmup() {
 
     for i in $(seq 1 $max_wait); do
         # Check if warmup complete by looking for "WARMUP COMPLETE" in log
-        if ssh ares "grep -q 'WARMUP COMPLETE' $log_file" 2>/dev/null; then
+        if grep -q 'WARMUP COMPLETE' $log_file 2>/dev/null; then
             log_info "✓ $node warmup complete (${i}s)"
             return 0
         fi
@@ -95,7 +95,7 @@ wait_for_warmup() {
             log_debug "  Waiting for $node... (${i}s / ${max_wait}s)"
 
             # Show last line of log for visibility
-            local last_line=$(ssh ares "tail -1 $log_file" 2>/dev/null || echo "")
+            local last_line=$(tail -1 $log_file 2>/dev/null || echo "")
             if [ -n "$last_line" ]; then
                 log_debug "  Last: $last_line"
             fi
@@ -164,7 +164,7 @@ done
 
 # Check NFS
 BASE_DIR=$(pwd)
-if ssh ares "ssh $WORKER_B_NODE 'test -d $BASE_DIR'" 2>/dev/null; then
+if ssh $WORKER_B_NODE "test -d $BASE_DIR" 2>/dev/null; then
     log_info "  ✓ NFS mount verified"
 else
     log_error "  ✗ NFS mount not accessible"
@@ -193,34 +193,34 @@ log_info "━━━━━━━━━━━━━━━━━━━━━━━�
 # Worker B
 log_info "Starting Worker B on $WORKER_B_NODE..."
 WORKER_B_LOG="$BASE_DIR/$LOGS_DIR/worker_comp11.log"
-ssh ares "ssh $WORKER_B_NODE 'cd $BASE_DIR && nohup uv run worker \
+ssh $WORKER_B_NODE "cd $BASE_DIR && nohup ~/.local/bin/uv run worker \
     --node-id comp11 \
     --listen-port $WORKER_PORT \
     --ntp-server $NTP_SERVER \
     --chronotick-server $CHRONOTICK_SERVER \
     --output $RESULTS_DIR/worker_comp11.csv \
     --log-level INFO \
-    > $WORKER_B_LOG 2>&1 &'"
+    > $WORKER_B_LOG 2>&1 &"
 
 sleep 2
 
 # Worker C
 log_info "Starting Worker C on $WORKER_C_NODE..."
 WORKER_C_LOG="$BASE_DIR/$LOGS_DIR/worker_comp12.log"
-ssh ares "ssh $WORKER_C_NODE 'cd $BASE_DIR && nohup uv run worker \
+ssh $WORKER_C_NODE "cd $BASE_DIR && nohup ~/.local/bin/uv run worker \
     --node-id comp12 \
     --listen-port $WORKER_PORT \
     --ntp-server $NTP_SERVER \
     --chronotick-server $CHRONOTICK_SERVER \
     --output $RESULTS_DIR/worker_comp12.csv \
     --log-level INFO \
-    > $WORKER_C_LOG 2>&1 &'"
+    > $WORKER_C_LOG 2>&1 &"
 
 sleep 2
 
 # Verify workers started
 log_info "Verifying worker processes..."
-if ssh ares "ssh $WORKER_B_NODE 'pgrep -f worker.py'" &>/dev/null; then
+if ssh $WORKER_B_NODE 'pgrep -f worker.py' &>/dev/null; then
     log_info "  ✓ Worker B process running"
 else
     log_error "  ✗ Worker B failed to start"
@@ -228,7 +228,7 @@ else
     exit 1
 fi
 
-if ssh ares "ssh $WORKER_C_NODE 'pgrep -f worker.py'" &>/dev/null; then
+if ssh $WORKER_C_NODE 'pgrep -f worker.py' &>/dev/null; then
     log_info "  ✓ Worker C process running"
 else
     log_error "  ✗ Worker C failed to start"
@@ -291,12 +291,12 @@ log_info "Running coordinator on $COORDINATOR_NODE..."
 log_info "(This will take approximately ${TEST_DURATION_MINUTES} minutes)"
 echo
 
-ssh ares "ssh $COORDINATOR_NODE 'cd $BASE_DIR && uv run coordinator \
+ssh $COORDINATOR_NODE "cd $BASE_DIR && ~/.local/bin/uv run coordinator \
     --workers $WORKER_B_NODE:$WORKER_PORT,$WORKER_C_NODE:$WORKER_PORT \
     --num-events $NUM_EVENTS \
     --pattern $CUSTOM_PATTERN \
     --output $RESULTS_DIR/coordinator.csv \
-    2>&1 | tee $COORDINATOR_LOG'"
+    2>&1 | tee $COORDINATOR_LOG"
 
 COORDINATOR_EXIT=$?
 
