@@ -200,7 +200,8 @@ class StreamingEvaluationAnalyzer:
             }
 
             self.logger.info(f"  {window_ms}ms windows:")
-            self.logger.info(f"    NTP agreement: {ntp_agrees}/{total} ({results[f\"{window_ms}ms\"]['ntp_agreement_pct']:.1f}%)")
+            window_key = f"{window_ms}ms"
+            self.logger.info(f"    NTP agreement: {ntp_agrees}/{total} ({results[window_key]['ntp_agreement_pct']:.1f}%)")
             self.logger.info(f"    ChronoTick confident: {ct_both_confident.sum()}, ambiguous: {ct_ambiguous}")
 
         return results
