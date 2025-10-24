@@ -1001,8 +1001,8 @@ class DatasetManager:
 
         # FIX: Use adaptive context window during startup to avoid going back before experiment started
         # During first 512 seconds, use elapsed time as window; after that use full 512s
-        if self.dataset_manager.first_measurement_time is not None:
-            experiment_elapsed = end_time - self.dataset_manager.first_measurement_time
+        if self.first_measurement_time is not None:
+            experiment_elapsed = end_time - self.first_measurement_time
             actual_context = min(context_window_size, experiment_elapsed)
         else:
             # Fallback if first_measurement_time not tracked (shouldn't happen)
@@ -1010,8 +1010,8 @@ class DatasetManager:
 
         # Calculate correction window, ensuring we don't go before experiment start
         correction_start = end_time - actual_context
-        if self.dataset_manager.first_measurement_time is not None:
-            correction_start = max(correction_start, self.dataset_manager.first_measurement_time)
+        if self.first_measurement_time is not None:
+            correction_start = max(correction_start, self.first_measurement_time)
 
         correction_end = end_time
         correction_duration = correction_end - correction_start

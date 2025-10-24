@@ -348,7 +348,7 @@ def main():
     print("=" * 80)
     print()
 
-    # CSV header (V3: Added new columns for Fix 1 & Fix 2 analysis)
+    # CSV header (V3: Added new columns for Fix 1 & Fix 2 analysis + system clock drift)
     csv_file = open(CSV_PATH, 'w', newline='')
     csv_writer = csv.writer(csv_file)
     csv_writer.writerow([
@@ -365,6 +365,7 @@ def main():
         'chronotick_confidence',
         'chronotick_source',
         'time_since_ntp_s',              # V3: NEW - seconds since last NTP anchor
+        'system_clock_drift_rate',       # DRIFT EXP: System clock drift in s/s
         'ntp_time',
         'ntp_offset_ms',
         'ntp_uncertainty_ms',
@@ -387,6 +388,11 @@ def main():
     last_ntp_true_time = None      # True time from last NTP measurement
     last_ntp_system_time = None    # System time when last NTP was taken
     last_ntp_timestamp = 0         # Track when last NTP was taken
+
+    # DRIFT EXP: System clock drift tracking
+    last_ntp_offset_ms = None      # Last NTP offset in ms
+    last_ntp_elapsed = None        # Elapsed time at last NTP
+    system_clock_drift_rate = 0.0  # System clock drift rate in s/s
 
     while True:
         elapsed = time.time() - test_start_time
@@ -485,6 +491,17 @@ def main():
                     last_ntp_system_time = system_time  # System time at measurement
                     last_ntp_timestamp = elapsed
 
+                    # DRIFT EXP: Calculate system clock drift rate
+                    if last_ntp_offset_ms is not None and last_ntp_elapsed is not None:
+                        time_diff = elapsed - last_ntp_elapsed  # seconds
+                        offset_diff = ntp_offset_ms - last_ntp_offset_ms  # ms
+                        # drift rate in s/s = (offset_diff in ms / time_diff in s) / 1000
+                        system_clock_drift_rate = (offset_diff / time_diff) / 1000.0
+
+                    # Update tracking variables for next calculation
+                    last_ntp_offset_ms = ntp_offset_ms
+                    last_ntp_elapsed = elapsed
+
                     # V3: Enhanced logging showing both fixes
                     print(f"[{elapsed:6.1f}s] 📡 NTP: offset={ntp_offset_ms:>8.2f}ms ± {ntp_uncertainty_ms:.2f}ms "
                           f"(combined {ntp_n_combined}/{ntp_n_total}, MAD={ntp_mad_ms:.2f}ms)")
@@ -504,7 +521,7 @@ def main():
                 if ntp_sample_count == 0:
                     print(f"⚠️  Multi-server NTP query failed at {elapsed:.1f}s: {e}")
 
-        # Log to CSV (V3: New columns for Fix 1 & Fix 2 analysis)
+        # Log to CSV (V3: New columns for Fix 1 & Fix 2 analysis + system clock drift)
         csv_writer.writerow([
             sample_number,
             elapsed,
@@ -519,6 +536,7 @@ def main():
             chronotick_confidence,
             chronotick_source,
             time_since_ntp_s,               # V3: NEW
+            system_clock_drift_rate,        # DRIFT EXP: System clock drift in s/s
             ntp_time,
             ntp_offset_ms,
             ntp_uncertainty_ms,
