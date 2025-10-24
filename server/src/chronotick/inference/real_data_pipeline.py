@@ -306,6 +306,9 @@ class DatasetManager:
         # Phase 2 tracking for test analysis
         self.baseline_update_count = 0
         self.total_raw_jump = 0.0  # Track cumulative raw baseline changes
+
+        # Track first measurement timestamp for adaptive context window
+        self.first_measurement_time = None
         self.total_smoothed_jump = 0.0  # Track cumulative smoothed baseline changes
 
         # Phase 3A: Drift rate tracking
@@ -419,6 +422,10 @@ class DatasetManager:
         Phase 3B: Uses window-based drift calculation for better noise immunity.
         """
         with self.lock:
+            # Track first measurement timestamp for adaptive context window
+            if self.first_measurement_time is None:
+                self.first_measurement_time = measurement.timestamp
+
             # First store the measurement
             self.measurement_dataset[int(measurement.timestamp)] = {
                 'timestamp': measurement.timestamp,
@@ -992,18 +999,28 @@ class DatasetManager:
         # CRITICAL: Get context window size from config
         context_window_size = 512  # TimesFM default context length
 
-        # FIX: Expand correction window to cover full context
-        # OLD: Only correct between last NTP and current NTP (180s)
-        # NEW: Correct full context window before current NTP (512s)
-        # CRITICAL: Don't limit by start_time - always go back full 512s!
-        correction_start = end_time - context_window_size
+        # FIX: Use adaptive context window during startup to avoid going back before experiment started
+        # During first 512 seconds, use elapsed time as window; after that use full 512s
+        if self.dataset_manager.first_measurement_time is not None:
+            experiment_elapsed = end_time - self.dataset_manager.first_measurement_time
+            actual_context = min(context_window_size, experiment_elapsed)
+        else:
+            # Fallback if first_measurement_time not tracked (shouldn't happen)
+            actual_context = context_window_size
+
+        # Calculate correction window, ensuring we don't go before experiment start
+        correction_start = end_time - actual_context
+        if self.dataset_manager.first_measurement_time is not None:
+            correction_start = max(correction_start, self.dataset_manager.first_measurement_time)
+
         correction_end = end_time
         correction_duration = correction_end - correction_start
 
-        logger.info(f"[BACKTRACKING] Starting backtracking learning correction (CONTEXT WINDOW FIX)")
+        logger.info(f"[BACKTRACKING] Starting backtracking learning correction (ADAPTIVE CONTEXT WINDOW)")
         logger.info(f"[BACKTRACKING] Error: {error*1000:.2f}ms over NTP interval: {interval_duration:.0f}s")
         logger.info(f"[BACKTRACKING] CONTEXT WINDOW COVERAGE:")
-        logger.info(f"  Context size: {context_window_size}s")
+        logger.info(f"  Max context size: {context_window_size}s")
+        logger.info(f"  Actual context used: {actual_context:.0f}s (adaptive during startup)")
         logger.info(f"  NTP interval: [{start_time:.0f}, {end_time:.0f}] = {interval_duration:.0f}s")
         logger.info(f"  Correction window: [{correction_start:.0f}, {correction_end:.0f}] = {correction_duration:.0f}s")
         logger.info(f"  Expected samples: ~{int(correction_duration)}")
