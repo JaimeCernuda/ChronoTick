@@ -1,0 +1,32 @@
+[project]
+name = "chronotick-streaming-eval"
+version = "1.0.0"
+description = "ChronoTick Data Streaming Evaluation: TrueTime-style bounded clock consensus"
+authors = [
+    {name = "ChronoTick Team"}
+]
+requires-python = ">=3.10"
+dependencies = [
+    "pandas>=2.0.0",
+    "numpy>=1.24.0",
+    "matplotlib>=3.7.0",
+    "pyyaml>=6.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "black>=23.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+dev-dependencies = []
+
+[project.scripts]
+coordinator = "src.coordinator:main"
+worker = "src.worker:main"
+analyze = "analysis.generate_all_figures:main"
