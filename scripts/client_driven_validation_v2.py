@@ -394,12 +394,15 @@ def main():
         try:
             correction = pipeline.get_real_clock_correction(system_time)
 
-            chronotick_time = system_time + correction.offset
-            chronotick_offset_ms = correction.offset * 1000
-            chronotick_uncertainty_ms = correction.uncertainty * 1000
+            chronotick_time = system_time + correction.offset_correction
+            chronotick_offset_ms = correction.offset_correction * 1000
+            chronotick_uncertainty_ms = correction.offset_uncertainty * 1000
             chronotick_confidence = correction.confidence
             chronotick_source = correction.source
         except Exception as e:
+            # Log the exception for debugging
+            if sample_number % 60 == 0:  # Log every minute to avoid spam
+                print(f"  ⚠️  ChronoTick prediction error at sample {sample_number}: {type(e).__name__}: {e}")
             chronotick_time = system_time
             chronotick_offset_ms = 0.0
             chronotick_uncertainty_ms = 0.0
