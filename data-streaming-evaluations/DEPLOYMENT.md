@@ -26,7 +26,7 @@ This maps to ARES master node NTP proxy which redirects to actual NTP servers.
 
 **ChronoTick Server** (similar mapping):
 ```bash
---chronotick-server 172.20.1.1:8124
+--chronotick-server 172.20.1.1:8123
 ```
 Uses the same proxy mechanism for ChronoTick inference server.
 
