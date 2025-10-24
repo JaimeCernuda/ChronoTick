@@ -70,10 +70,11 @@ check_node() {
 
 kill_processes() {
     log_debug "Cleaning up existing processes..."
-    ssh $COORDINATOR_NODE 'pkill -f "uv run coordinator" || pkill -f coordinator.py || true' &>/dev/null
-    ssh $WORKER_B_NODE 'pkill -f "uv run worker" || pkill -f worker.py || true' &>/dev/null
-    ssh $WORKER_C_NODE 'pkill -f "uv run worker" || pkill -f worker.py || true' &>/dev/null
+    ssh $COORDINATOR_NODE 'pkill -f "uv run coordinator" || pkill -f coordinator.py || true' 2>/dev/null || true
+    ssh $WORKER_B_NODE 'pkill -f "uv run worker" || pkill -f worker.py || true' 2>/dev/null || true
+    ssh $WORKER_C_NODE 'pkill -f "uv run worker" || pkill -f worker.py || true' 2>/dev/null || true
     sleep 2
+    log_debug "Cleanup complete"
 }
 
 wait_for_warmup() {
