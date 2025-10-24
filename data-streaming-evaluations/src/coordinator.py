@@ -17,6 +17,8 @@ import yaml
 from src.common import (
     Event,
     UDPBroadcaster,
+    NTPClient,
+    ChronoTickClient,
     setup_logging,
     high_precision_sleep
 )
@@ -53,7 +55,9 @@ class Coordinator:
                  workers: List[Tuple[str, int]],
                  num_events: int,
                  pattern: BroadcastPattern,
-                 output_file: Path):
+                 output_file: Path,
+                 ntp_server: str = None,
+                 chronotick_server: str = None):
         self.workers = workers
         self.num_events = num_events
         self.pattern = pattern
@@ -62,18 +66,39 @@ class Coordinator:
         self.broadcaster = UDPBroadcaster(timeout=5.0)
         self.logger = setup_logging(level="INFO")
 
+        # Initialize timing clients if provided
+        self.ntp_client = None
+        self.chronotick_client = None
+
+        if ntp_server:
+            self.logger.info(f"Initializing NTP client (servers: {ntp_server})...")
+            ntp_servers = ntp_server.split(',')
+            self.ntp_client = NTPClient(ntp_servers)
+
+        if chronotick_server:
+            self.logger.info(f"Initializing ChronoTick client (server: {chronotick_server})...")
+            self.chronotick_client = ChronoTickClient(chronotick_server)
+
         # Prepare output CSV
         self.output_file.parent.mkdir(parents=True, exist_ok=True)
         self.csv_file = open(self.output_file, 'w', newline='')
-        self.csv_writer = csv.DictWriter(self.csv_file, fieldnames=[
+
+        # Extended fieldnames to include NTP/ChronoTick data
+        fieldnames = [
             'event_id',
             'sequence_number',
             'send_time_ns',
             'send_time_iso',
+            'ntp_offset_ms',
+            'ntp_timestamp_ns',
+            'ct_offset_ms',
+            'ct_timestamp_ns',
             'pattern_delay_ms',
             'workers_sent',
             'workers_failed'
-        ])
+        ]
+
+        self.csv_writer = csv.DictWriter(self.csv_file, fieldnames=fieldnames)
         self.csv_writer.writeheader()
 
     def run(self):
@@ -96,6 +121,26 @@ class Coordinator:
             send_time_ns = time.time_ns()
             results = self.broadcaster.send(event, self.workers)
 
+            # Query timing services
+            ntp_offset_ms = None
+            ntp_timestamp_ns = None
+            ct_offset_ms = None
+            ct_timestamp_ns = None
+
+            if self.ntp_client:
+                try:
+                    ntp_offset_ms, _ = self.ntp_client.query()
+                    ntp_timestamp_ns = send_time_ns + int(ntp_offset_ms * 1_000_000)
+                except Exception as e:
+                    self.logger.warning(f"NTP query failed: {e}")
+
+            if self.chronotick_client:
+                try:
+                    ct_offset_ms, _ = self.chronotick_client.query()
+                    ct_timestamp_ns = send_time_ns + int(ct_offset_ms * 1_000_000)
+                except Exception as e:
+                    self.logger.warning(f"ChronoTick query failed: {e}")
+
             # Record
             workers_sent = [addr for addr, success in results.items() if success]
             workers_failed = [addr for addr, success in results.items() if not success]
@@ -105,6 +150,10 @@ class Coordinator:
                 'sequence_number': seq,
                 'send_time_ns': send_time_ns,
                 'send_time_iso': time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(send_time_ns / 1e9)),
+                'ntp_offset_ms': ntp_offset_ms,
+                'ntp_timestamp_ns': ntp_timestamp_ns,
+                'ct_offset_ms': ct_offset_ms,
+                'ct_timestamp_ns': ct_timestamp_ns,
                 'pattern_delay_ms': self.pattern.pattern[seq % len(self.pattern.pattern)] * 1000,
                 'workers_sent': ','.join(workers_sent),
                 'workers_failed': ','.join(workers_failed) if workers_failed else ''
@@ -155,6 +204,10 @@ def main():
                        help='Output CSV file')
     parser.add_argument('--pattern', type=str, default='slow,fast,fast,fast,fast,medium',
                        help='Broadcast pattern (comma-separated: slow,fast,medium)')
+    parser.add_argument('--ntp-server', type=str, default=None,
+                       help='NTP server(s) for coordinator timestamps (comma-separated)')
+    parser.add_argument('--chronotick-server', type=str, default=None,
+                       help='ChronoTick server URL for coordinator timestamps')
 
     args = parser.parse_args()
 
@@ -176,7 +229,9 @@ def main():
         workers=workers,
         num_events=args.num_events,
         pattern=pattern,
-        output_file=args.output
+        output_file=args.output,
+        ntp_server=args.ntp_server,
+        chronotick_server=args.chronotick_server
     )
 
     coordinator.run()
