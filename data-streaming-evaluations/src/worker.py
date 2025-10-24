@@ -19,7 +19,7 @@ from typing import Optional, Dict, Any
 from collections import deque
 import logging
 
-from common import (
+from src.common import (
     Event,
     TimestampRecord,
     UDPListener,

@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import List, Tuple
 import yaml
 
-from common import (
+from src.common import (
     Event,
     UDPBroadcaster,
     setup_logging,
