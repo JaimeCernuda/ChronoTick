@@ -254,6 +254,7 @@ class TimesFMModel(BaseTimeSeriesModel):
                 # TimesFM 2.5 provides quantile forecasts
                 # Format depends on model output structure
                 if isinstance(quantile_forecast, dict):
+                    # Dict format: {q_level: values}
                     for q_level, q_values in quantile_forecast.items():
                         if isinstance(q_values, (list, np.ndarray)):
                             q_arr = np.array(q_values)
@@ -261,6 +262,28 @@ class TimesFMModel(BaseTimeSeriesModel):
                                 quantiles[str(q_level)] = q_arr[0][:horizon]
                             else:
                                 quantiles[str(q_level)] = q_arr[:horizon]
+                elif isinstance(quantile_forecast, np.ndarray):
+                    # Array format: shape (batch, horizon, num_quantiles)
+                    # TimesFM 2.5 returns (1, 30, 10) for 10 quantile levels
+                    if quantile_forecast.ndim == 3:
+                        # Extract quantiles for first batch element
+                        q_array = quantile_forecast[0]  # Shape: (horizon, num_quantiles)
+                        num_quantiles = q_array.shape[1]
+
+                        # TimesFM uses 10 quantiles: [0.01, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+                        # Map to standard quantile levels
+                        if num_quantiles == 10:
+                            quantile_levels = ['0.01', '0.1', '0.2', '0.3', '0.4', '0.5', '0.6', '0.7', '0.8', '0.9']
+                        else:
+                            # Generic mapping if different number of quantiles
+                            quantile_levels = [str(round((i+1) / (num_quantiles+1), 2)) for i in range(num_quantiles)]
+
+                        for idx, q_level in enumerate(quantile_levels):
+                            quantiles[q_level] = q_array[:horizon, idx]
+
+                        logger.info(f"[QUANTILES] Extracted {len(quantiles)} quantile levels from numpy array: {list(quantiles.keys())}")
+                    else:
+                        logger.warning(f"Unexpected quantile_forecast shape: {quantile_forecast.shape}, expected 3D array")
                 logger.debug(f"Extracted {len(quantiles) if quantiles else 0} quantile levels")
 
             logger.info(f"Generated {len(predictions)} predictions")
