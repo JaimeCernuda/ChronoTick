@@ -198,28 +198,28 @@ log_info "━━━━━━━━━━━━━━━━━━━━━━━�
 # Worker B
 log_info "Starting Worker B on $WORKER_B_NODE..."
 WORKER_B_LOG="$BASE_DIR/$LOGS_DIR/worker_comp11.log"
-ssh $WORKER_B_NODE "cd $BASE_DIR && nohup .venv/bin/worker \
+ssh -n $WORKER_B_NODE "cd $BASE_DIR && nohup .venv/bin/worker \
     --node-id comp11 \
     --listen-port $WORKER_PORT \
     --ntp-server $NTP_SERVER \
     --chronotick-server $CHRONOTICK_SERVER \
     --output $RESULTS_DIR/worker_comp11.csv \
     --log-level INFO \
-    > $WORKER_B_LOG 2>&1 &"
+    < /dev/null > $WORKER_B_LOG 2>&1 &"
 
 sleep 2
 
 # Worker C
 log_info "Starting Worker C on $WORKER_C_NODE..."
 WORKER_C_LOG="$BASE_DIR/$LOGS_DIR/worker_comp12.log"
-ssh $WORKER_C_NODE "cd $BASE_DIR && nohup .venv/bin/worker \
+ssh -n $WORKER_C_NODE "cd $BASE_DIR && nohup .venv/bin/worker \
     --node-id comp12 \
     --listen-port $WORKER_PORT \
     --ntp-server $NTP_SERVER \
     --chronotick-server $CHRONOTICK_SERVER \
     --output $RESULTS_DIR/worker_comp12.csv \
     --log-level INFO \
-    > $WORKER_C_LOG 2>&1 &"
+    < /dev/null > $WORKER_C_LOG 2>&1 &"
 
 sleep 2
 
