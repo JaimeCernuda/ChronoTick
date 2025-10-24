@@ -128,7 +128,11 @@ monitor_logs() {
 # Banner
 #================================================================
 
-clear
+# Clear screen if TERM is set
+if [ -n "$TERM" ]; then
+    clear || true
+fi
+
 echo -e "${GREEN}"
 cat << "EOF"
 ╔══════════════════════════════════════════════════════════╗
