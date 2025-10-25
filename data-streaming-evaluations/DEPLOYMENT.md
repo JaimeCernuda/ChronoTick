@@ -134,6 +134,335 @@ nohup uv run worker \
 
 ---
 
+## 🧠 ChronoTick Worker Deployment (Embedded AI Inference)
+
+ChronoTick workers run embedded AI inference locally on each worker node (no external HTTP server required). This deployment is for comparing AI-based timing predictions against NTP reference measurements.
+
+### Key Differences from System Clock Workers
+
+| Feature | System Clock Worker | ChronoTick Worker |
+|---------|---------------------|-------------------|
+| **Module** | `src.worker` | `src.worker_chronotick` |
+| **Python Path** | Standard venv | Requires ChronoTick source in PYTHONPATH |
+| **Model Loading** | None | TimesFM 2.5 models (30-60s load time) |
+| **Warmup Time** | 10s | 90s (model loading + NTP collection) |
+| **CSV Schema** | 8 fields (NTP only) | 17 fields (NTP + ChronoTick) |
+| **Environment** | Minimal | Requires HuggingFace cache + offline mode |
+| **Dependencies** | Basic | ChronoTick inference engine |
+
+### ChronoTick Worker Command
+
+**Base Directory**: `/mnt/common/jcernudagarcia/ChronoTick/data-streaming-evaluations`
+
+**Worker B (ares-comp-11)**:
+```bash
+ssh ares-comp-11 "cd $BASE_DIR && \
+  HF_HOME=/mnt/common/jcernudagarcia/.cache/huggingface \
+  TRANSFORMERS_CACHE=/mnt/common/jcernudagarcia/.cache/huggingface \
+  TRANSFORMERS_OFFLINE=1 \
+  HF_HUB_OFFLINE=1 \
+  PYTHONPATH=/mnt/common/jcernudagarcia/ChronoTick/server/src:$BASE_DIR \
+  /mnt/common/jcernudagarcia/ChronoTick/.venv/bin/python -m src.worker_chronotick \
+    --node-id comp11 \
+    --listen-port 9000 \
+    --ntp-server 172.20.1.1:8123 \
+    --chronotick-config configs/chronotick_config.yaml \
+    --output results/test/worker_comp11.csv \
+    --log-level INFO \
+    > logs/test/worker_comp11.log 2>&1" &
+```
+
+**Worker C (ares-comp-12)**:
+```bash
+ssh ares-comp-12 "cd $BASE_DIR && \
+  HF_HOME=/mnt/common/jcernudagarcia/.cache/huggingface \
+  TRANSFORMERS_CACHE=/mnt/common/jcernudagarcia/.cache/huggingface \
+  TRANSFORMERS_OFFLINE=1 \
+  HF_HUB_OFFLINE=1 \
+  PYTHONPATH=/mnt/common/jcernudagarcia/ChronoTick/server/src:$BASE_DIR \
+  /mnt/common/jcernudagarcia/ChronoTick/.venv/bin/python -m src.worker_chronotick \
+    --node-id comp12 \
+    --listen-port 9000 \
+    --ntp-server 172.20.1.1:8123 \
+    --chronotick-config configs/chronotick_config.yaml \
+    --output results/test/worker_comp12.csv \
+    --log-level INFO \
+    > logs/test/worker_comp12.log 2>&1" &
+```
+
+### Environment Variables Explained
+
+**CRITICAL**: Compute nodes (ares-comp-11, ares-comp-12) have NO internet access. Models must be pre-cached and transformers library must run in offline mode.
+
+| Variable | Purpose | Value |
+|----------|---------|-------|
+| `HF_HOME` | HuggingFace cache root | `/mnt/common/jcernudagarcia/.cache/huggingface` |
+| `TRANSFORMERS_CACHE` | Transformers model cache | Same as HF_HOME |
+| `TRANSFORMERS_OFFLINE=1` | Disable transformers internet access | Required |
+| `HF_HUB_OFFLINE=1` | Disable HuggingFace Hub queries | Required |
+| `PYTHONPATH` | ChronoTick source + worker source | `/mnt/common/jcernudagarcia/ChronoTick/server/src:$BASE_DIR` |
+
+**Without offline mode**: Workers will attempt to download from huggingface.co and fail (DNS resolution fails on compute nodes).
+
+**With offline mode**: Only 2-3 HuggingFace warnings (harmless cache validation), test succeeds.
+
+### ChronoTick Configuration File
+
+**File**: `configs/chronotick_config.yaml` (167 lines)
+
+**Key Settings**:
+```yaml
+clock_measurement:
+  ntp:
+    servers:
+      - 172.20.1.1:8123  # Multi-server NTP proxy
+      - 172.20.1.1:8124
+      - 172.20.1.1:8125
+      # ... (10 total servers via proxy)
+    parallel_queries: true
+    max_workers: 10
+    enable_fallback: true
+  timing:
+    warm_up:
+      duration_seconds: 60
+      measurement_interval: 1  # Aggressive warmup
+
+short_term:
+  model_name: timesfm
+  device: cpu
+  prediction_horizon: 30
+  model_params:
+    model_repo: google/timesfm-2.5-200m-pytorch
+    context_length: 512
+    prediction_length: 30
+
+long_term:
+  model_name: timesfm
+  device: cpu
+  prediction_horizon: 60
+  model_params:
+    model_repo: google/timesfm-2.5-200m-pytorch
+    context_length: 512
+    prediction_length: 60
+
+fusion:
+  enabled: true
+  method: none
+  fallback_weights:
+    short_term: 0.8
+    long_term: 0.2
+```
+
+### ChronoTick CSV Schema (17 Fields)
+
+**System Clock Worker** (8 fields):
+```csv
+event_id,node_id,sequence_number,receive_time_ns,coordinator_send_time_ns,
+ntp_offset_ms,ntp_uncertainty_ms,ntp_timestamp_ns
+```
+
+**ChronoTick Worker** (17 fields):
+```csv
+event_id,node_id,sequence_number,receive_time_ns,coordinator_send_time_ns,
+# NTP reference
+ntp_offset_ms,ntp_uncertainty_ms,ntp_timestamp_ns,
+# ChronoTick AI prediction
+ct_offset_ms,ct_drift_rate,ct_uncertainty_ms,ct_confidence,ct_source,
+ct_prediction_time,ct_timestamp_ns,ct_lower_bound_ns,ct_upper_bound_ns
+```
+
+**Sample ChronoTick Data**:
+```csv
+91,comp11,90,1761370722914336032,1761370722913687470,-23.59771728515625,5.0,1761370722890738315,2.1131368517096907,1.0461766489089259e-06,0.007650473972363639,0.99998176,fusion,1761370722.918138,1761370722916449168,1761370722916426217,1761370722916472119
+```
+
+**Field Explanations**:
+- `ct_offset_ms`: ChronoTick predicted clock offset (milliseconds)
+- `ct_drift_rate`: Clock drift rate (microseconds/second)
+- `ct_uncertainty_ms`: Prediction uncertainty (milliseconds)
+- `ct_confidence`: Confidence interval metric `(Q3-Q1)/2.56` (NOT a probability!)
+- `ct_source`: Prediction source (`cpu`, `gpu`, or `fusion`)
+- `ct_prediction_time`: Unix timestamp when prediction was made
+- `ct_timestamp_ns`: Corrected timestamp (receive_time_ns + ct_offset_ms)
+- `ct_lower_bound_ns`: Lower uncertainty bound
+- `ct_upper_bound_ns`: Upper uncertainty bound
+
+### Deployment Scripts
+
+**2-Minute Quick Test** (`deploy_chronotick_2min.sh`):
+- 100 events over 120 seconds
+- 90s warmup (model loading + NTP)
+- Purpose: Validation before full test
+- Expected duration: ~3.5 minutes total
+
+**30-Minute Production Test** (`deploy_chronotick_30min.sh`):
+- 3000 events over 1800 seconds
+- 90s warmup
+- Purpose: Full dataset for ChronoTick vs NTP comparison
+- Expected duration: ~32 minutes total
+
+**Usage**:
+```bash
+ssh ares
+cd /mnt/common/jcernudagarcia/ChronoTick/data-streaming-evaluations
+
+# Quick validation test
+./deploy_chronotick_2min.sh
+
+# Full production test (after validation succeeds)
+./deploy_chronotick_30min.sh
+```
+
+### Warmup Phase (90 Seconds)
+
+**Why 90 seconds?**
+1. **Model Loading** (30-60s): TimesFM 2.5 models load from disk
+2. **NTP Collection** (60s): Collect initial measurements for ChronoTick baseline
+3. **CSV File Creation**: File isn't created until AFTER model loading completes
+
+**Deployment Script Validation**:
+```bash
+# CORRECT: Wait full 90s, then validate ONCE
+for i in {15..90..15}; do
+    sleep 15
+    log_info "Warmup: ${i}s / 90s (allowing model loading time)"
+done
+
+# Validate ONCE after full warmup completes
+if [ ! -f "$RESULTS_DIR/worker_comp11.csv" ]; then
+    log_error "Worker B failed to create CSV after 90s warmup!"
+    exit 1
+fi
+```
+
+**INCORRECT** (old version - causes premature exit):
+```bash
+# DON'T DO THIS: Checking at 15s intervals causes premature failure
+for i in {15..90..15}; do
+    sleep 15
+    if [ ! -f "$RESULTS_DIR/worker_comp11.csv" ]; then
+        log_error "Worker B failed to start!"  # FAILS AT 15s!
+        exit 1
+    fi
+done
+```
+
+### Pre-cached Models
+
+**Location**: `/mnt/common/jcernudagarcia/.cache/huggingface/hub/models--google--timesfm-2.5-200m-pytorch`
+
+**Verification**:
+```bash
+ssh ares "ls -lh /mnt/common/jcernudagarcia/.cache/huggingface/hub/models--google--timesfm-2.5-200m-pytorch/snapshots/"
+```
+
+**Expected**: Directory exists with model checkpoint files (~800MB total)
+
+**If missing**: Models need to be downloaded on master node (has internet):
+```bash
+ssh ares
+cd /mnt/common/jcernudagarcia/ChronoTick
+source .venv/bin/activate
+python -c "from transformers import AutoModelForSeq2SeqLM; AutoModelForSeq2SeqLM.from_pretrained('google/timesfm-2.5-200m-pytorch')"
+```
+
+### Troubleshooting ChronoTick Workers
+
+#### Worker Fails to Import ChronoTick Modules
+
+**Error**:
+```
+ModuleNotFoundError: No module named 'chronotick'
+```
+
+**Solution**: Check PYTHONPATH includes ChronoTick source:
+```bash
+PYTHONPATH=/mnt/common/jcernudagarcia/ChronoTick/server/src:$BASE_DIR
+```
+
+#### HuggingFace Download Attempts on Compute Nodes
+
+**Error** (in worker logs):
+```
+Could not reach huggingface.co
+Trying to load from cache...
+Traceback: Connection failed
+```
+
+**Root Cause**: Missing offline mode environment variables
+
+**Solution**: Add ALL offline mode variables:
+```bash
+HF_HOME=/mnt/common/jcernudagarcia/.cache/huggingface
+TRANSFORMERS_CACHE=/mnt/common/jcernudagarcia/.cache/huggingface
+TRANSFORMERS_OFFLINE=1
+HF_HUB_OFFLINE=1
+```
+
+**Expected Result**: Only 2-3 warnings (harmless), no download attempts
+
+#### CSV File Not Created After 90s Warmup
+
+**Error**:
+```
+Worker B failed to create CSV after 90s warmup!
+```
+
+**Possible Causes**:
+1. Model loading taking longer than 90s (rare)
+2. Worker process crashed during initialization
+3. Permissions issue writing CSV file
+
+**Debug**:
+```bash
+# Check worker log for actual error
+cat logs/chronotick_2min_TIMESTAMP/worker_comp11.log
+
+# Check if worker process is running
+ssh ares-comp-11 "ps aux | grep worker_chronotick"
+
+# Check NFS permissions
+ssh ares-comp-11 "touch /mnt/common/jcernudagarcia/ChronoTick/data-streaming-evaluations/results/test.txt && rm /mnt/common/jcernudagarcia/ChronoTick/data-streaming-evaluations/results/test.txt"
+```
+
+#### Fake Confidence Bug (confidence = 1.0 exactly)
+
+**Symptoms**: All confidence values are exactly `1.0`
+
+**Root Cause**: Bug in older ChronoTick versions where confidence calculation was broken
+
+**Check**:
+```bash
+# View actual confidence values from test
+tail -5 results/chronotick_2min_TIMESTAMP/worker_comp11.csv | cut -d, -f12
+
+# Should see realistic values like: 0.9999746, 0.99997264, 0.99996895
+# NOT exactly: 1.0, 1.0, 1.0
+```
+
+**Fix**: Pull latest ChronoTick code (fix committed in ChronoTick repo)
+```bash
+ssh ares
+cd /mnt/common/jcernudagarcia/ChronoTick
+git pull
+```
+
+#### Orphaned Worker Processes
+
+**Symptoms**: Workers continue running after deployment script exits
+
+**Cause**: Deployment script exited prematurely during warmup, workers backgrounded and never killed
+
+**Solution**: Kill all ChronoTick workers before new test:
+```bash
+ssh ares-comp-11 "pkill -9 -f 'worker_chronotick' || true"
+ssh ares-comp-12 "pkill -9 -f 'worker_chronotick' || true"
+```
+
+**Prevention**: Fixed in deployment scripts (commit 53e74f9) - wait full 90s before validation
+
+---
+
 ## 🔧 Manual Deployment (Step-by-Step)
 
 If you prefer manual control or need to debug:
