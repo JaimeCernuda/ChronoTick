@@ -88,7 +88,7 @@ log_info "STEP 2: STARTING CHRONOTICK WORKERS"
 log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 log_info "Starting ChronoTick Worker B on $WORKER_B_NODE..."
-ssh $WORKER_B_NODE "cd $BASE_DIR && .venv/bin/worker-chronotick \
+ssh $WORKER_B_NODE "cd $BASE_DIR && PYTHONPATH=/mnt/common/jcernudagarcia/ChronoTick/server/src:$BASE_DIR python3 -m src.worker_chronotick \
     --node-id comp11 \
     --listen-port $WORKER_PORT \
     --ntp-server $NTP_SERVER \
@@ -101,7 +101,7 @@ W1=$!
 sleep 2
 
 log_info "Starting ChronoTick Worker C on $WORKER_C_NODE..."
-ssh $WORKER_C_NODE "cd $BASE_DIR && .venv/bin/worker-chronotick \
+ssh $WORKER_C_NODE "cd $BASE_DIR && PYTHONPATH=/mnt/common/jcernudagarcia/ChronoTick/server/src:$BASE_DIR python3 -m src.worker_chronotick \
     --node-id comp12 \
     --listen-port $WORKER_PORT \
     --ntp-server $NTP_SERVER \
@@ -150,7 +150,7 @@ log_info "Broadcasting $NUM_EVENTS events over $TEST_DURATION seconds..."
 echo
 
 # Run coordinator in foreground (blocks until complete)
-ssh $COORDINATOR_NODE "cd $BASE_DIR && .venv/bin/coordinator \
+ssh $COORDINATOR_NODE "cd $BASE_DIR && PYTHONPATH=$BASE_DIR python3 -m src.coordinator \
     --workers $WORKER_B_NODE:$WORKER_PORT,$WORKER_C_NODE:$WORKER_PORT \
     --num-events $NUM_EVENTS \
     --target-duration $TEST_DURATION \
