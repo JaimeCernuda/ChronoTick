@@ -88,7 +88,7 @@ log_info "STEP 2: STARTING CHRONOTICK WORKERS"
 log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 log_info "Starting ChronoTick Worker B on $WORKER_B_NODE..."
-ssh $WORKER_B_NODE "cd $BASE_DIR && PYTHONPATH=/mnt/common/jcernudagarcia/ChronoTick/server/src:$BASE_DIR /mnt/common/jcernudagarcia/ChronoTick/.venv/bin/python -m src.worker_chronotick \
+ssh $WORKER_B_NODE "cd $BASE_DIR && HF_HOME=/mnt/common/jcernudagarcia/.cache/huggingface PYTHONPATH=/mnt/common/jcernudagarcia/ChronoTick/server/src:$BASE_DIR /mnt/common/jcernudagarcia/ChronoTick/.venv/bin/python -m src.worker_chronotick \
     --node-id comp11 \
     --listen-port $WORKER_PORT \
     --ntp-server $NTP_SERVER \
@@ -101,7 +101,7 @@ W1=$!
 sleep 2
 
 log_info "Starting ChronoTick Worker C on $WORKER_C_NODE..."
-ssh $WORKER_C_NODE "cd $BASE_DIR && PYTHONPATH=/mnt/common/jcernudagarcia/ChronoTick/server/src:$BASE_DIR /mnt/common/jcernudagarcia/ChronoTick/.venv/bin/python -m src.worker_chronotick \
+ssh $WORKER_C_NODE "cd $BASE_DIR && HF_HOME=/mnt/common/jcernudagarcia/.cache/huggingface PYTHONPATH=/mnt/common/jcernudagarcia/ChronoTick/server/src:$BASE_DIR /mnt/common/jcernudagarcia/ChronoTick/.venv/bin/python -m src.worker_chronotick \
     --node-id comp12 \
     --listen-port $WORKER_PORT \
     --ntp-server $NTP_SERVER \
