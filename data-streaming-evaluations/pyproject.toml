@@ -32,4 +32,5 @@ packages = ["src", "analysis"]
 [project.scripts]
 coordinator = "src.coordinator:main"
 worker = "src.worker:main"
+worker-chronotick = "src.worker_chronotick:main"
 analyze = "analysis.generate_all_figures:main"
