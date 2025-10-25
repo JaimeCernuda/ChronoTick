@@ -121,23 +121,27 @@ log_info "━━━━━━━━━━━━━━━━━━━━━━━�
 log_info "STEP 3: WARMUP PHASE (90 seconds for ChronoTick + NTP)"
 log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
+# Wait full warmup period without premature validation
+# (ChronoTick models take 30-60s to load before CSV files are created)
 for i in {15..90..15}; do
     sleep 15
-    log_info "Warmup: ${i}s / 90s"
-
-    # Verify workers still alive
-    if [ ! -f "$RESULTS_DIR/worker_comp11.csv" ]; then
-        log_error "Worker B failed to start!"
-        cat "$LOGS_DIR/worker_comp11.log" 2>/dev/null || echo "No log file"
-        exit 1
-    fi
-
-    if [ ! -f "$RESULTS_DIR/worker_comp12.csv" ]; then
-        log_error "Worker C failed to start!"
-        cat "$LOGS_DIR/worker_comp12.log" 2>/dev/null || echo "No log file"
-        exit 1
-    fi
+    log_info "Warmup: ${i}s / 90s (allowing model loading time)"
 done
+
+# Validate ONCE after full warmup completes
+if [ ! -f "$RESULTS_DIR/worker_comp11.csv" ]; then
+    log_error "Worker B failed to create CSV after 90s warmup!"
+    log_error "Worker B log:"
+    cat "$LOGS_DIR/worker_comp11.log" 2>/dev/null || echo "No log file"
+    exit 1
+fi
+
+if [ ! -f "$RESULTS_DIR/worker_comp12.csv" ]; then
+    log_error "Worker C failed to create CSV after 90s warmup!"
+    log_error "Worker C log:"
+    cat "$LOGS_DIR/worker_comp12.log" 2>/dev/null || echo "No log file"
+    exit 1
+fi
 
 log_info "✓ Warmup complete - ChronoTick workers ready"
 echo
