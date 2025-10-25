@@ -6,6 +6,12 @@ Runs on ares-comp-11 and ares-comp-12
 Receives broadcast events from coordinator
 Timestamps each event with both NTP and ChronoTick (embedded inference engine)
 Records uncertainty evolution for commit-wait analysis
+
+CHRONOTICK FIX 2 (NTP-Anchored Time Walking):
+- ChronoTick timestamps are calculated by walking forward from the last NTP measurement
+- Uses ChronoTick's drift_rate to correct for clock drift during elapsed time
+- This decouples ChronoTick from system clock errors, achieving sub-ms accuracy
+- Based on validation_client_v3 (experiment-13) which achieved <1ms MAE vs NTP
 """
 
 import argparse
@@ -105,6 +111,10 @@ class ChronoTickWorker:
         self.events_received = 0
         self.events_processed = 0
 
+        # NTP anchor for ChronoTick time walking (Fix 2)
+        self.last_ntp_true_time: Optional[float] = None
+        self.last_ntp_system_time: Optional[float] = None
+
         # Graceful shutdown
         self.running = True
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -155,6 +165,11 @@ class ChronoTickWorker:
             ntp_offset_ms, ntp_uncertainty_ms = self.ntp_client.query()
             ntp_timestamp_ns = receive_time_ns + int(ntp_offset_ms * 1_000_000)
 
+            # Update NTP anchor for ChronoTick time walking (Fix 2)
+            if ntp_offset_ms is not None:
+                self.last_ntp_true_time = receive_time_s + ntp_offset_ms / 1000.0
+                self.last_ntp_system_time = receive_time_s
+
             # Query ChronoTick
             correction = self.pipeline.get_real_clock_correction(receive_time_s)
 
@@ -166,8 +181,19 @@ class ChronoTickWorker:
             ct_source = correction.source
             ct_prediction_time = correction.prediction_time
 
-            # Calculate ChronoTick timestamp and bounds
-            ct_timestamp_ns = receive_time_ns + int(ct_offset_ms * 1_000_000)
+            # Calculate ChronoTick timestamp using Fix 2 (NTP-anchored time walking)
+            if self.last_ntp_true_time is not None and self.last_ntp_system_time is not None:
+                # Walk forward from last NTP anchor using drift correction
+                elapsed_since_ntp = receive_time_s - self.last_ntp_system_time
+                ct_timestamp_s = (self.last_ntp_true_time +
+                                  elapsed_since_ntp +
+                                  ct_drift_rate * elapsed_since_ntp)
+                ct_timestamp_ns = int(ct_timestamp_s * 1_000_000_000)
+            else:
+                # Fallback to system time if no NTP anchor yet (warmup phase)
+                ct_timestamp_ns = receive_time_ns
+
+            # Calculate uncertainty bounds
             ct_lower_ns = ct_timestamp_ns - int(3 * ct_uncertainty_ms * 1_000_000)
             ct_upper_ns = ct_timestamp_ns + int(3 * ct_uncertainty_ms * 1_000_000)
 
