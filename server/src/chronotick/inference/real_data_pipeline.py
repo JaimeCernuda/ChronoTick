@@ -1153,8 +1153,16 @@ class DatasetManager:
                 # Store replacement details
                 replacements.append((timestamp, current_offset, ntp_interpolated, replacement_delta))
 
-                # REPLACE prediction with interpolated NTP value
+                # EXPERIMENT-14: Calculate drift as constant slope between NTP measurements
+                # Since offset is linearly interpolated, drift is the constant derivative
+                ntp_interpolated_drift = (ntp_after_offset - ntp_before_offset) / total_duration
+                # Convert from s/s to μs/s for consistency with NTP-calculated drift
+                ntp_interpolated_drift_us_per_s = ntp_interpolated_drift * 1e6
+
+                # REPLACE prediction with interpolated NTP values (offset AND drift)
                 self.measurement_dataset[timestamp]['offset'] = ntp_interpolated
+                self.measurement_dataset[timestamp]['drift'] = ntp_interpolated_drift_us_per_s
+                self.measurement_dataset[timestamp]['drift_source'] = 'ntp_interpolated'
                 self.measurement_dataset[timestamp]['corrected'] = True
 
                 # Statistics
@@ -1216,6 +1224,90 @@ class DatasetManager:
                     logger.info(f"  {i}. t={ts}: {old*1000:.3f}ms → {new*1000:.3f}ms (Δ={delta*1000:+.3f}ms)")
 
             logger.info(f"[BACKTRACKING] ═══════════════════════════════════════════")
+
+        # EXPERIMENT-14: Correct drift predictions using linear regression over NTP measurements
+        # This prevents autoregressive error accumulation in drift predictions
+        # Uses ONLY NTP ground truth points, NOT interpolated corrected offsets
+        # Uses sliding window linear regression (5-7 points) for robustness to outliers
+        if correction_count > 0:
+            logger.info(f"[DRIFT_CORRECTION] Correcting drift predictions using NTP measurement linear regression...")
+
+            # Collect ONLY NTP measurements (ground truth) sorted by timestamp
+            ntp_data = []
+            for timestamp in sorted(self.measurement_dataset.keys()):
+                data = self.measurement_dataset[timestamp]
+                if data.get('source') == 'ntp':  # Only use real NTP measurements
+                    ntp_data.append((timestamp, data['offset']))
+
+            logger.info(f"[DRIFT_CORRECTION] Found {len(ntp_data)} NTP measurements for drift calculation")
+
+            # Calculate drift using sliding window linear regression (more robust than 2-point derivatives)
+            # Window size: 5-7 points for optimal balance between noise reduction and temporal resolution
+            if len(ntp_data) >= 5:
+                window_size = min(7, len(ntp_data))  # Use 7 points if available, otherwise use all
+                drift_corrections_made = 0
+
+                logger.info(f"[DRIFT_CORRECTION] Using sliding window linear regression (window={window_size} points)")
+
+                for i, (timestamp, offset) in enumerate(ntp_data):
+                    # Determine window boundaries (centered on current point when possible)
+                    half_window = window_size // 2
+
+                    if i < half_window:
+                        # Start of data: use forward window
+                        window_start = 0
+                        window_end = min(window_size, len(ntp_data))
+                    elif i >= len(ntp_data) - half_window:
+                        # End of data: use backward window
+                        window_end = len(ntp_data)
+                        window_start = max(0, window_end - window_size)
+                    else:
+                        # Middle: use centered window
+                        window_start = i - half_window
+                        window_end = i + half_window + 1
+
+                    # Extract window data
+                    window_timestamps = np.array([ntp_data[j][0] for j in range(window_start, window_end)])
+                    window_offsets = np.array([ntp_data[j][1] for j in range(window_start, window_end)])
+
+                    # Fit linear regression: offset = slope * time + intercept
+                    # Slope is drift rate (dOffset/dt)
+                    coeffs = np.polyfit(window_timestamps, window_offsets, deg=1)
+                    drift = coeffs[0]  # Slope coefficient (s/s)
+
+                    # Convert from s/s to μs/s
+                    drift_us_per_s = drift * 1e6
+
+                    # Update drift in dataset (at NTP timestamp)
+                    self.measurement_dataset[timestamp]['drift'] = drift_us_per_s
+                    drift_corrections_made += 1
+
+                logger.info(f"[DRIFT_CORRECTION] ✅ Corrected {drift_corrections_made} drift values using linear regression")
+                logger.info(f"[DRIFT_CORRECTION] Method: Sliding window (size={window_size}) over NTP ground truth points")
+                logger.info(f"[DRIFT_CORRECTION] Benefits: Robust to outliers, smooth drift for model context, no interpolation errors")
+
+            elif len(ntp_data) >= 2:
+                # Fallback to simple linear fit if we have 2-4 points (not enough for sliding window)
+                logger.info(f"[DRIFT_CORRECTION] Using simple linear regression ({len(ntp_data)} points, need 5+ for sliding window)")
+
+                timestamps = np.array([t for t, _ in ntp_data])
+                offsets = np.array([o for _, o in ntp_data])
+
+                # Single linear fit over all available points
+                coeffs = np.polyfit(timestamps, offsets, deg=1)
+                drift = coeffs[0]  # Slope (s/s)
+                drift_us_per_s = drift * 1e6
+
+                # Apply same drift to all NTP points (since we don't have enough for sliding window)
+                drift_corrections_made = 0
+                for timestamp, _ in ntp_data:
+                    self.measurement_dataset[timestamp]['drift'] = drift_us_per_s
+                    drift_corrections_made += 1
+
+                logger.info(f"[DRIFT_CORRECTION] ✅ Corrected {drift_corrections_made} drift values using simple linear fit")
+                logger.warning(f"[DRIFT_CORRECTION] ⚠ Need 5+ NTP points for robust sliding window regression")
+            else:
+                logger.warning(f"[DRIFT_CORRECTION] ⚠ Need at least 2 NTP points for drift correction, found {len(ntp_data)}")
 
         # CRITICAL: Log context window coverage metrics
         context_coverage_pct = (correction_count / context_window_size * 100) if context_window_size > 0 else 0

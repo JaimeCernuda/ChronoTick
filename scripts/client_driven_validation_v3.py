@@ -360,6 +360,8 @@ def main():
         'chronotick_time_fix2',          # V3: Fix 2 (ntp_anchor + elapsed + drift*elapsed)
         'chronotick_offset_ms',
         'chronotick_drift_rate',         # V3: NEW - drift rate in s/s
+        'chronotick_drift_uncertainty',  # EXPERIMENT-14: Drift uncertainty in s/s
+        'chronotick_drift_source',       # EXPERIMENT-14: Source of drift (timesfm_predicted/ntp_calculated)
         'chronotick_prediction_time',    # V3: NEW - when prediction was made
         'chronotick_uncertainty_ms',
         'chronotick_confidence',
@@ -414,6 +416,8 @@ def main():
             # Extract fields
             chronotick_offset_ms = correction.offset_correction * 1000
             chronotick_drift_rate = correction.drift_rate
+            chronotick_drift_uncertainty = getattr(correction, 'drift_uncertainty', 0.0)  # EXPERIMENT-14
+            chronotick_drift_source = "timesfm_predicted"  # EXPERIMENT-14: Only TimesFM (no fallbacks)
             chronotick_prediction_time = correction.prediction_time
             chronotick_uncertainty_ms = correction.offset_uncertainty * 1000
             chronotick_confidence = correction.confidence
@@ -447,6 +451,8 @@ def main():
             chronotick_time_fix2 = system_time
             chronotick_offset_ms = 0.0
             chronotick_drift_rate = 0.0
+            chronotick_drift_uncertainty = 0.0  # EXPERIMENT-14
+            chronotick_drift_source = "error"  # EXPERIMENT-14
             chronotick_prediction_time = system_time
             chronotick_uncertainty_ms = 0.0
             chronotick_confidence = 0.0
@@ -521,7 +527,7 @@ def main():
                 if ntp_sample_count == 0:
                     print(f"⚠️  Multi-server NTP query failed at {elapsed:.1f}s: {e}")
 
-        # Log to CSV (V3: New columns for Fix 1 & Fix 2 analysis + system clock drift)
+        # Log to CSV (V3: New columns for Fix 1 & Fix 2 analysis + system clock drift + EXPERIMENT-14 drift fields)
         csv_writer.writerow([
             sample_number,
             elapsed,
@@ -531,6 +537,8 @@ def main():
             chronotick_time_fix2,           # V3: NEW
             chronotick_offset_ms,
             chronotick_drift_rate,          # V3: NEW
+            chronotick_drift_uncertainty,   # EXPERIMENT-14: NEW
+            chronotick_drift_source,        # EXPERIMENT-14: NEW
             chronotick_prediction_time,     # V3: NEW
             chronotick_uncertainty_ms,
             chronotick_confidence,
