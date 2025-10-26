@@ -350,7 +350,7 @@ class TSFMModelWrapper:
 
             predictions.append(PredictionWithUncertainty(
                 offset=offset,
-                drift=drift,
+                drift=drift_s_per_s,
                 offset_uncertainty=offset_uncertainty,
                 drift_uncertainty=drift_uncertainty,
                 confidence=prediction_result.confidence,  # Use confidence from engine (based on uncertainty)
