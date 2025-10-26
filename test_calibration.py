@@ -36,7 +36,7 @@ def test_calibration():
     print("\n2. Initializing RealDataPipeline...")
     try:
         pipeline = RealDataPipeline(
-            config_path="server/src/chronotick/inference/config.yaml"
+            config_path="configs/config_ares.yaml"
         )
         print("   ✓ Pipeline initialized")
     except Exception as e:
