@@ -110,9 +110,9 @@ def test_batch_forecasting():
     print("\n5. Verifying output shapes...")
 
     expected_point_shape = (2, 5)
-    # With 8 custom quantiles [0.001, 0.01, 0.05, 0.1, 0.9, 0.95, 0.99, 0.999]
-    # TimesFM outputs: [mean, q1, q2, q3, ...] so we expect 9 values (mean + 8 quantiles)
-    expected_quantile_shape = (2, 5, 9)
+    # TimesFM 2.5 default outputs: (batch, horizon, 10)
+    # Format: [mean, 10th, 20th, 30th, 40th, 50th, 60th, 70th, 80th, 90th percentiles]
+    expected_quantile_shape = (2, 5, 10)
 
     if isinstance(point_forecast, torch.Tensor):
         point_shape = tuple(point_forecast.shape)
