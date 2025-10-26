@@ -101,31 +101,44 @@ class TSFMModelWrapper:
         logger.debug(f"TSFMModelWrapper.predict_with_uncertainty ENTRY: horizon={horizon}, model_type={self.model_type}")
 
         try:
-            # Get historical offset data from dataset manager
-            logger.debug(f"Getting offset history from dataset manager...")
-            offset_history = self._get_offset_history()
-            logger.debug(f"offset_history: {len(offset_history) if offset_history is not None else 0} data points")
+            # EXPERIMENT-14: Get BOTH offset and drift histories for batch forecasting
+            logger.debug(f"[BATCH_FORECAST] Getting batch inputs (offset + drift)...")
+            offset_history, drift_history = self._get_batch_inputs()
+            logger.debug(f"[BATCH_FORECAST] Offset history: {len(offset_history) if offset_history is not None else 0} data points")
+            logger.debug(f"[BATCH_FORECAST] Drift history: {len(drift_history) if drift_history is not None else 0} data points")
 
             if offset_history is None or len(offset_history) < 10:
                 error_msg = f"CRITICAL: Insufficient historical data for {self.model_type} prediction (got {len(offset_history) if offset_history is not None else 0} points, need at least 10)"
                 logger.error(error_msg)
                 raise RuntimeError(error_msg)
 
+            # Log batch forecasting status
+            logger.info(f"[BATCH_FORECAST] Batch inputs ready for {self.model_type} model:")
+            logger.info(f"[BATCH_FORECAST]   Offset history: {len(offset_history)} points")
+            logger.info(f"[BATCH_FORECAST]   Drift history: {len(drift_history) if drift_history is not None else 0} points")
+
             # Get system metrics as covariates (if available)
             logger.debug(f"Getting covariates...")
             covariates = self._get_covariates(horizon)
             logger.debug(f"Covariates: {list(covariates.keys()) if covariates else None}")
 
-            # Make prediction using ChronoTickInferenceEngine
-            logger.debug(f"Calling predict_method with offset_history length={len(offset_history)}")
-            prediction_result = self.predict_method(offset_history, covariates)
-            logger.debug(f"predict_method returned: {prediction_result is not None}")
+            # EXPERIMENT-14: Call predict_method with BOTH offset and drift
+            logger.debug(f"[BATCH_FORECAST] Calling predict_method with batch inputs...")
+            prediction_result = self.predict_method(offset_history, drift_history, covariates)
+            logger.debug(f"[BATCH_FORECAST] predict_method returned: {prediction_result is not None}")
 
             if prediction_result is None:
                 # Gracefully handle None returns (insufficient data for long-term model)
                 # Return empty list so scheduler can continue with other models
                 logger.warning(f"{self.model_type} model returned None (insufficient data) - returning empty predictions")
                 return []
+
+            # EXPERIMENT-14: Log batch forecasting results
+            logger.info(f"[BATCH_FORECAST] Results received for {self.model_type} model:")
+            logger.info(f"[BATCH_FORECAST]   Offset predictions: {len(prediction_result.predictions) if prediction_result.predictions is not None else 0}")
+            logger.info(f"[BATCH_FORECAST]   Drift predictions: {len(prediction_result.drift_predictions) if prediction_result.drift_predictions is not None else 0}")
+            logger.info(f"[BATCH_FORECAST]   Offset uncertainty: {len(prediction_result.uncertainty) if prediction_result.uncertainty is not None else 0}")
+            logger.info(f"[BATCH_FORECAST]   Drift uncertainty: {len(prediction_result.drift_uncertainty) if prediction_result.drift_uncertainty is not None else 0}")
 
             # Log quantile/uncertainty info from prediction_result
             logger.info(f"[UNCERTAINTY_CHECK] {self.model_type} prediction_result:")
@@ -149,84 +162,49 @@ class TSFMModelWrapper:
             logger.warning(f"{self.model_type} model failed - returning empty predictions to keep system running")
             return []
 
-    def _get_offset_history(self) -> Optional[np.ndarray]:
+    def _get_batch_inputs(self) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         """
-        Get historical offset data from dataset manager with normalization.
+        Get historical offset and drift data for batch forecasting (Experiment-14).
 
-        Phase 3C: Now optionally retrieves drift data for multivariate predictions.
+        EXPERIMENT-14: Returns BOTH offset and drift as separate 1D arrays for TimesFM batch forecasting.
 
         Returns:
-            Array of historical data (offsets only or offsets+drifts), or None if insufficient data
+            Tuple of (offset_history, drift_history), or (None, None) if insufficient data
         """
-        logger.debug(f"_get_offset_history called (multivariate={self.enable_multivariate})")
+        logger.debug(f"_get_batch_inputs called for Experiment-14 batch forecasting")
         try:
-            if self.enable_multivariate:
-                # Phase 3C: Get measurements with drift for multivariate input
-                recent_measurements, normalization_bias, current_drift = \
-                    self.dataset_manager.get_recent_measurements_with_drift(
-                        window_seconds=None,
-                        normalize=True
-                    )
+            # Get measurements with drift from dataset manager
+            recent_measurements, normalization_bias, current_drift = \
+                self.dataset_manager.get_recent_measurements_with_drift(
+                    window_seconds=None,
+                    normalize=True
+                )
 
-                if not recent_measurements:
-                    logger.warning("No recent measurements available from dataset manager")
-                    return None
+            if not recent_measurements:
+                logger.warning("No recent measurements available from dataset manager")
+                return None, None
 
-                # Store normalization bias and current drift
-                self.normalization_bias = normalization_bias
-                self.current_drift = current_drift
+            # Store normalization bias and current drift
+            self.normalization_bias = normalization_bias
+            self.current_drift = current_drift
 
-                if normalization_bias is not None:
-                    logger.info(f"[NORMALIZATION] Multivariate model training on residuals "
-                               f"(baseline: {normalization_bias*1000:.3f}ms, drift: {current_drift:.3f}μs/s)")
+            if normalization_bias is not None:
+                logger.info(f"[BATCH_INPUTS] Batch forecasting on residuals "
+                           f"(baseline: {normalization_bias*1000:.3f}ms, drift: {current_drift:.3f}μs/s)")
 
-                # Extract offsets and drifts (measurements are tuples of (timestamp, offset, drift))
-                offsets = np.array([offset for timestamp, offset, drift in recent_measurements])
-                drifts_us_per_s = np.array([drift for timestamp, offset, drift in recent_measurements])
+            # Extract offsets and drifts as separate 1D arrays
+            offsets = np.array([offset for timestamp, offset, drift in recent_measurements])
+            drifts = np.array([drift for timestamp, offset, drift in recent_measurements])
 
-                # Convert drift from μs/s to s/s for consistency with offset units
-                drifts_s_per_s = drifts_us_per_s * 1e-6
+            logger.info(f"[BATCH_INPUTS] Retrieved {len(offsets)} measurements")
+            logger.info(f"[BATCH_INPUTS]   Offset range: [{offsets.min()*1000:.3f}, {offsets.max()*1000:.3f}] ms")
+            logger.info(f"[BATCH_INPUTS]   Drift range: [{drifts.min():.3f}, {drifts.max():.3f}] μs/s")
 
-                # Stack as multivariate input: shape (2, sequence_length)
-                # Row 0: offsets, Row 1: drift rates
-                multivariate_history = np.stack([offsets, drifts_s_per_s], axis=0)
-
-                logger.debug(f"Retrieved {len(offsets)} measurements with drift for multivariate input")
-                logger.debug(f"Multivariate shape: {multivariate_history.shape} (2 variables × {len(offsets)} timesteps)")
-
-                return multivariate_history
-
-            else:
-                # Univariate approach: Get offsets for training, but ALSO retrieve drift for Phase 3D
-                # CRITICAL FIX: Must call get_recent_measurements_with_drift() to update self.current_drift
-                recent_measurements, normalization_bias, current_drift = \
-                    self.dataset_manager.get_recent_measurements_with_drift(
-                        window_seconds=None,
-                        normalize=True
-                    )
-
-                if not recent_measurements:
-                    logger.warning("No recent measurements available from dataset manager")
-                    return None
-
-                # Store normalization bias AND drift (Phase 3D fix)
-                self.normalization_bias = normalization_bias
-                self.current_drift = current_drift  # CRITICAL: Update drift for Phase 3D
-
-                if normalization_bias is not None:
-                    logger.info(f"[NORMALIZATION] Univariate model training on residuals "
-                               f"(baseline: {normalization_bias*1000:.3f}ms, drift: {current_drift:.3f}μs/s)")
-
-                # Extract only offsets for univariate training (ignore drift channel)
-                offsets = np.array([offset for timestamp, offset, drift in recent_measurements])
-
-                logger.debug(f"Retrieved {len(offsets)} historical offsets (normalized), "
-                           f"drift={current_drift:.3f}μs/s for Phase 3D correction")
-                return offsets
+            return offsets, drifts
 
         except Exception as e:
-            logger.error(f"Failed to get offset history: {e}")
-            return None
+            logger.error(f"Failed to get batch inputs: {e}")
+            return None, None
 
     def _get_covariates(self, horizon: int) -> Optional[Dict[str, np.ndarray]]:
         """
@@ -299,28 +277,35 @@ class TSFMModelWrapper:
             else:
                 offset = offset_residual
 
-            # Phase 3D: Use calculated drift rate from NTP measurements
-            # Convert from μs/s to s/s for consistency
-            drift = self.current_drift * 1e-6  # Convert μs/s → s/s
-            drift_source = "ntp_calc"  # Track where drift came from
+            # EXPERIMENT-14: Extract drift prediction from batch forecasting
+            drift_us_per_s = self.current_drift  # Default fallback to current drift estimate
+            drift_source = "ntp_calc_fallback"
 
-            # Fallback: approximate from consecutive predictions if no drift available
-            if drift == 0.0 and i < num_predictions - 1:
-                drift = float(prediction_result.predictions[i + 1] - prediction_result.predictions[i])
-                drift_source = "pred_approx"
-            elif drift == 0.0 and i > 0:
-                drift = float(prediction_result.predictions[i] - prediction_result.predictions[i - 1])
-                drift_source = "pred_approx"
-            elif drift == 0.0:
-                drift_source = "none"
+            if prediction_result.drift_predictions is not None and i < len(prediction_result.drift_predictions):
+                # Use predicted drift from TimesFM batch forecasting
+                drift_us_per_s = float(prediction_result.drift_predictions[i])
+                drift_source = "timesfm_batch"
+                if i == 0:  # Log first prediction only
+                    logger.info(f"[BATCH_CONVERT] ✅ Using TimesFM drift predictions from batch forecasting")
+            else:
+                # Fallback: approximate from consecutive offset predictions if no drift predicted
+                if i < num_predictions - 1:
+                    drift_us_per_s = float(prediction_result.predictions[i + 1] - prediction_result.predictions[i]) * 1e6
+                    drift_source = "offset_approx"
+                elif i > 0:
+                    drift_us_per_s = float(prediction_result.predictions[i] - prediction_result.predictions[i - 1]) * 1e6
+                    drift_source = "offset_approx"
+                if i == 0:  # Log warning once
+                    logger.warning(f"[BATCH_CONVERT] ⚠ No drift predictions available from model - using fallback")
 
-            # Log Phase 3D application for verification (first prediction only)
+            # Convert drift from μs/s to s/s for PredictionWithUncertainty
+            drift_s_per_s = drift_us_per_s * 1e-6
+
+            # Log drift usage for verification (first prediction only)
             if i == 0:
-                logger.info(f"[PHASE3D_APPLY] Drift correction applied: "
-                           f"drift={self.current_drift:.3f}μs/s ({drift*1e6:.3f}μs/s as s/s), "
-                           f"source={drift_source}")
-                if drift_source == "ntp_calc":
-                    logger.info(f"  → Phase 3 Impact: Using real NTP-calculated drift rate")
+                logger.info(f"[BATCH_CONVERT] Drift extraction:")
+                logger.info(f"[BATCH_CONVERT]   Value: {drift_us_per_s:.3f} μs/s ({drift_s_per_s*1e6:.3f} μs/s as s/s)")
+                logger.info(f"[BATCH_CONVERT]   Source: {drift_source}")
 
             # Get uncertainty - CRITICAL FOR UNCERTAINTY QUANTIFICATION
             if prediction_result.uncertainty is not None and i < len(prediction_result.uncertainty):
@@ -338,8 +323,16 @@ class TSFMModelWrapper:
                     logger.error(f"[UNCERTAINTY] Falling back to 1.0ms (THIS IS WRONG AND MUST BE FIXED!)")
                 offset_uncertainty = 0.001  # 1ms fallback - THIS SHOULD NOT HAPPEN
 
-            # Drift uncertainty (approximate as 10% of offset uncertainty)
-            drift_uncertainty = offset_uncertainty * 0.1
+            # EXPERIMENT-14: Extract drift uncertainty from batch forecasting
+            if prediction_result.drift_uncertainty is not None and i < len(prediction_result.drift_uncertainty):
+                drift_uncertainty = float(prediction_result.drift_uncertainty[i])
+                if i == 0:  # Log first prediction only
+                    logger.info(f"[BATCH_CONVERT] ✅ Model provided drift uncertainty: {drift_uncertainty*1e6:.3f} μs/s")
+            else:
+                # Fallback: approximate as 10% of offset uncertainty
+                drift_uncertainty = offset_uncertainty * 0.1
+                if i == 0:  # Log warning once
+                    logger.warning(f"[BATCH_CONVERT] ⚠ No drift uncertainty from model - using offset*0.1 fallback")
 
             # Extract quantiles for this timestep (if available)
             # DENORMALIZATION: Quantiles also need bias adjustment

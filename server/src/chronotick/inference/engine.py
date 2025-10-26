@@ -39,10 +39,16 @@ class ModelType(Enum):
 
 @dataclass
 class PredictionResult:
-    """Container for prediction results."""
-    predictions: np.ndarray
-    uncertainty: Optional[np.ndarray] = None
-    quantiles: Optional[Dict[str, np.ndarray]] = None
+    """Container for prediction results with batch support for offset and drift (Experiment-14)."""
+    predictions: np.ndarray  # Offset predictions
+    uncertainty: Optional[np.ndarray] = None  # Offset uncertainty
+    quantiles: Optional[Dict[str, np.ndarray]] = None  # Offset quantiles
+
+    # EXPERIMENT-14: Drift prediction support via TimesFM batch forecasting
+    drift_predictions: Optional[np.ndarray] = None  # Drift predictions (μs/s)
+    drift_uncertainty: Optional[np.ndarray] = None  # Drift uncertainty
+    drift_quantiles: Optional[Dict[str, np.ndarray]] = None  # Drift quantiles
+
     confidence: float = 1.0
     model_type: ModelType = ModelType.SHORT_TERM
     timestamp: float = 0.0
@@ -194,18 +200,23 @@ class ChronoTickInferenceEngine:
             logger.error(f"Failed to initialize models: {e}")
             return False
     
-    def predict_short_term(self, 
+    def predict_short_term(self,
                           offset_history: np.ndarray,
+                          drift_history: Optional[np.ndarray] = None,  # EXPERIMENT-14
                           covariates: Optional[Dict[str, np.ndarray]] = None) -> Optional[PredictionResult]:
         """
-        Generate short-term predictions for clock offset.
-        
+        Generate short-term predictions for clock offset and drift (Experiment-14).
+
+        EXPERIMENT-14: Now supports batch forecasting when drift_history is provided.
+        TimesFM will predict BOTH offset and drift in parallel.
+
         Args:
             offset_history: Historical offset values
+            drift_history: Historical drift values (μs/s) for batch forecasting (Experiment-14)
             covariates: Optional exogenous variables (system metrics)
-            
+
         Returns:
-            PredictionResult or None if prediction fails
+            PredictionResult with offset and drift predictions, or None if prediction fails
         """
         if not self.short_term_model or not self.config['short_term']['enabled']:
             return None
@@ -231,7 +242,60 @@ class ChronoTickInferenceEngine:
             # Generate prediction
             horizon = short_config.get('prediction_horizon', 5)
             
-            if covariates and self.config.get('covariates', {}).get('enabled', False):
+            # EXPERIMENT-14: Check if drift_history provided for batch forecasting
+            if drift_history is not None:
+                logger.info(f"[BATCH_FORECAST] Experiment-14: Batch forecasting enabled")
+                logger.info(f"[BATCH_FORECAST]   Offset history: {len(processed_history)} points")
+                logger.info(f"[BATCH_FORECAST]   Drift history: {len(drift_history)} points")
+
+                # Preprocess drift history
+                processed_drift = self._preprocess_data(drift_history)
+                if len(processed_drift) > context_length:
+                    processed_drift = processed_drift[-context_length:]
+
+                # Stack for batch forecasting: shape (2, sequence_length)
+                batch_input = np.stack([processed_history, processed_drift], axis=0)
+                logger.info(f"[BATCH_FORECAST]   Batch input shape: {batch_input.shape}")
+
+                result = self.short_term_model.forecast(
+                    batch_input,
+                    horizon,
+                    freq=self.frequency_info.freq_value
+                )
+                logger.info(f"[BATCH_FORECAST]   Batch forecast complete")
+
+                # EXPERIMENT-14: Unpack batch results
+                # Result shape: predictions (2, horizon), quantiles (2, horizon, 10)
+                # Index 0 = offset, Index 1 = drift
+                if isinstance(result.predictions, np.ndarray) and result.predictions.shape[0] == 2:
+                    offset_predictions = result.predictions[0, :]
+                    drift_predictions = result.predictions[1, :]
+                    logger.info(f"[BATCH_FORECAST]   Unpacked offset predictions: {len(offset_predictions)}")
+                    logger.info(f"[BATCH_FORECAST]   Unpacked drift predictions: {len(drift_predictions)}")
+
+                    # Unpack quantiles if available
+                    offset_quantiles = None
+                    drift_quantiles = None
+                    if result.quantiles is not None:
+                        # Quantiles shape: (2, horizon, 10)
+                        offset_quantiles = result.quantiles[0, :, :]  # (horizon, 10)
+                        drift_quantiles = result.quantiles[1, :, :]   # (horizon, 10)
+                        logger.info(f"[BATCH_FORECAST]   Unpacked quantiles for offset and drift")
+
+                    # Create modified result with unpacked values
+                    class BatchResult:
+                        def __init__(self, offset_pred, drift_pred, offset_quant, drift_quant, metadata):
+                            self.predictions = offset_pred
+                            self.drift_predictions = drift_pred
+                            self.quantiles = offset_quant
+                            self.drift_quantiles = drift_quant
+                            self.metadata = metadata
+
+                    result = BatchResult(offset_predictions, drift_predictions,
+                                       offset_quantiles, drift_quantiles, result.metadata)
+                else:
+                    logger.warning(f"[BATCH_FORECAST] Unexpected result shape: {result.predictions.shape}")
+            elif covariates and self.config.get('covariates', {}).get('enabled', False):
                 # Use covariates if available and enabled
                 covariates_input = self._prepare_covariates_input(
                     processed_history, covariates, horizon
@@ -259,13 +323,23 @@ class ChronoTickInferenceEngine:
             
             # Calculate uncertainty (if quantiles available)
             uncertainty = self._calculate_uncertainty(result.quantiles)
+
+            # EXPERIMENT-14: Calculate drift uncertainty if drift quantiles available
+            drift_uncertainty = None
+            if hasattr(result, 'drift_quantiles') and result.drift_quantiles is not None:
+                drift_uncertainty = self._calculate_uncertainty(result.drift_quantiles)
+                logger.info(f"[BATCH_FORECAST]   Drift uncertainty calculated: {drift_uncertainty[0] if len(drift_uncertainty) > 0 else 'N/A'}")
+
             confidence = self._calculate_confidence(uncertainty, short_config.get('max_uncertainty', 0.1))
-            
+
             # Create prediction result
             prediction = PredictionResult(
                 predictions=result.predictions,
                 uncertainty=uncertainty,
                 quantiles=result.quantiles,
+                drift_predictions=result.drift_predictions if hasattr(result, 'drift_predictions') else None,
+                drift_uncertainty=drift_uncertainty,
+                drift_quantiles=result.drift_quantiles if hasattr(result, 'drift_quantiles') else None,
                 confidence=confidence,
                 model_type=ModelType.SHORT_TERM,
                 timestamp=time.time(),
@@ -290,16 +364,21 @@ class ChronoTickInferenceEngine:
     
     def predict_long_term(self,
                          offset_history: np.ndarray,
+                         drift_history: Optional[np.ndarray] = None,  # EXPERIMENT-14: Batch forecasting
                          covariates: Optional[Dict[str, np.ndarray]] = None) -> Optional[PredictionResult]:
         """
-        Generate long-term predictions for clock offset.
-        
+        Generate long-term predictions for clock offset and drift (Experiment-14).
+
+        EXPERIMENT-14: Now supports batch forecasting when drift_history is provided.
+        TimesFM will predict BOTH offset and drift in parallel.
+
         Args:
             offset_history: Historical offset values
+            drift_history: Historical drift values (μs/s) for batch forecasting (Experiment-14)
             covariates: Optional exogenous variables
-            
+
         Returns:
-            PredictionResult or None if prediction fails
+            PredictionResult with offset and drift predictions, or None if prediction fails
         """
         if not self.long_term_model or not self.config['long_term']['enabled']:
             return None
@@ -324,8 +403,61 @@ class ChronoTickInferenceEngine:
 
             # Generate prediction
             horizon = long_config.get('prediction_horizon', 60)
-            
-            if covariates and self.config.get('covariates', {}).get('enabled', False):
+
+            # EXPERIMENT-14: Check if drift_history provided for batch forecasting
+            if drift_history is not None:
+                logger.info(f"[BATCH_FORECAST_LT] Experiment-14: Long-term batch forecasting enabled")
+                logger.info(f"[BATCH_FORECAST_LT]   Offset history: {len(processed_history)} points")
+                logger.info(f"[BATCH_FORECAST_LT]   Drift history: {len(drift_history)} points")
+
+                # Preprocess drift history
+                processed_drift = self._preprocess_data(drift_history)
+                if len(processed_drift) > context_length:
+                    processed_drift = processed_drift[-context_length:]
+
+                # Stack for batch forecasting: shape (2, sequence_length)
+                batch_input = np.stack([processed_history, processed_drift], axis=0)
+                logger.info(f"[BATCH_FORECAST_LT]   Batch input shape: {batch_input.shape}")
+
+                result = self.long_term_model.forecast(
+                    batch_input,
+                    horizon,
+                    freq=self.frequency_info.freq_value
+                )
+                logger.info(f"[BATCH_FORECAST_LT]   Batch forecast complete")
+
+                # EXPERIMENT-14: Unpack batch results
+                # Result shape: predictions (2, horizon), quantiles (2, horizon, 10)
+                # Index 0 = offset, Index 1 = drift
+                if isinstance(result.predictions, np.ndarray) and result.predictions.shape[0] == 2:
+                    offset_predictions = result.predictions[0, :]
+                    drift_predictions = result.predictions[1, :]
+                    logger.info(f"[BATCH_FORECAST_LT]   Unpacked offset predictions: {len(offset_predictions)}")
+                    logger.info(f"[BATCH_FORECAST_LT]   Unpacked drift predictions: {len(drift_predictions)}")
+
+                    # Unpack quantiles if available
+                    offset_quantiles = None
+                    drift_quantiles = None
+                    if result.quantiles is not None:
+                        # Quantiles shape: (2, horizon, 10)
+                        offset_quantiles = result.quantiles[0, :, :]  # (horizon, 10)
+                        drift_quantiles = result.quantiles[1, :, :]   # (horizon, 10)
+                        logger.info(f"[BATCH_FORECAST_LT]   Unpacked quantiles for offset and drift")
+
+                    # Create modified result with unpacked values
+                    class BatchResult:
+                        def __init__(self, offset_pred, drift_pred, offset_quant, drift_quant, metadata):
+                            self.predictions = offset_pred
+                            self.drift_predictions = drift_pred
+                            self.quantiles = offset_quant
+                            self.drift_quantiles = drift_quant
+                            self.metadata = metadata
+
+                    result = BatchResult(offset_predictions, drift_predictions,
+                                       offset_quantiles, drift_quantiles, result.metadata)
+                else:
+                    logger.warning(f"[BATCH_FORECAST_LT] Unexpected result shape: {result.predictions.shape}")
+            elif covariates and self.config.get('covariates', {}).get('enabled', False):
                 # Use covariates if available and enabled
                 covariates_input = self._prepare_covariates_input(
                     processed_history, covariates, horizon
@@ -353,13 +485,23 @@ class ChronoTickInferenceEngine:
             
             # Calculate uncertainty from quantiles
             uncertainty = self._calculate_uncertainty(result.quantiles)
+
+            # EXPERIMENT-14: Calculate drift uncertainty if drift quantiles available
+            drift_uncertainty = None
+            if hasattr(result, 'drift_quantiles') and result.drift_quantiles is not None:
+                drift_uncertainty = self._calculate_uncertainty(result.drift_quantiles)
+                logger.info(f"[BATCH_FORECAST_LT]   Drift uncertainty calculated: {drift_uncertainty[0] if len(drift_uncertainty) > 0 else 'N/A'}")
+
             confidence = 1.0  # Long-term model assumed to be high confidence
-            
+
             # Create prediction result
             prediction = PredictionResult(
                 predictions=result.predictions,
                 uncertainty=uncertainty,
                 quantiles=result.quantiles,
+                drift_predictions=result.drift_predictions if hasattr(result, 'drift_predictions') else None,
+                drift_uncertainty=drift_uncertainty,
+                drift_quantiles=result.drift_quantiles if hasattr(result, 'drift_quantiles') else None,
                 confidence=confidence,
                 model_type=ModelType.LONG_TERM,
                 timestamp=time.time(),
