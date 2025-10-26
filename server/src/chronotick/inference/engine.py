@@ -277,9 +277,20 @@ class ChronoTickInferenceEngine:
                     drift_quantiles = None
                     if result.quantiles is not None:
                         # Quantiles shape: (2, horizon, 10)
-                        offset_quantiles = result.quantiles[0, :, :]  # (horizon, 10)
-                        drift_quantiles = result.quantiles[1, :, :]   # (horizon, 10)
-                        logger.info(f"[BATCH_FORECAST]   Unpacked quantiles for offset and drift")
+                        offset_q_array = result.quantiles[0, :, :]  # (horizon, 10)
+                        drift_q_array = result.quantiles[1, :, :]   # (horizon, 10)
+
+                        # Convert numpy arrays to dictionary format for _calculate_uncertainty()
+                        # TimesFM 2.5 uses 10 quantiles: [0.01, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+                        quantile_levels = ['0.01', '0.1', '0.2', '0.3', '0.4', '0.5', '0.6', '0.7', '0.8', '0.9']
+
+                        offset_quantiles = {}
+                        drift_quantiles = {}
+                        for idx, q_level in enumerate(quantile_levels):
+                            offset_quantiles[q_level] = offset_q_array[:, idx]
+                            drift_quantiles[q_level] = drift_q_array[:, idx]
+
+                        logger.info(f"[BATCH_FORECAST]   Converted quantiles to dict format: {list(offset_quantiles.keys())}")
 
                     # Create modified result with unpacked values
                     class BatchResult:
@@ -438,9 +449,20 @@ class ChronoTickInferenceEngine:
                     drift_quantiles = None
                     if result.quantiles is not None:
                         # Quantiles shape: (2, horizon, 10)
-                        offset_quantiles = result.quantiles[0, :, :]  # (horizon, 10)
-                        drift_quantiles = result.quantiles[1, :, :]   # (horizon, 10)
-                        logger.info(f"[BATCH_FORECAST_LT]   Unpacked quantiles for offset and drift")
+                        offset_q_array = result.quantiles[0, :, :]  # (horizon, 10)
+                        drift_q_array = result.quantiles[1, :, :]   # (horizon, 10)
+
+                        # Convert numpy arrays to dictionary format for _calculate_uncertainty()
+                        # TimesFM 2.5 uses 10 quantiles: [0.01, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+                        quantile_levels = ['0.01', '0.1', '0.2', '0.3', '0.4', '0.5', '0.6', '0.7', '0.8', '0.9']
+
+                        offset_quantiles = {}
+                        drift_quantiles = {}
+                        for idx, q_level in enumerate(quantile_levels):
+                            offset_quantiles[q_level] = offset_q_array[:, idx]
+                            drift_quantiles[q_level] = drift_q_array[:, idx]
+
+                        logger.info(f"[BATCH_FORECAST_LT]   Converted quantiles to dict format: {list(offset_quantiles.keys())}")
 
                     # Create modified result with unpacked values
                     class BatchResult:
