@@ -361,6 +361,8 @@ def main():
         'chronotick_time_fix3',          # EXPERIMENT-14: Fix 3 (offset-only, no drift)
         'chronotick_time_fix4',          # EXPERIMENT-14: Fix 4 (pessimistic bound)
         'chronotick_time_fix5',          # EXPERIMENT-14: Fix 5 (optimistic bound)
+        'chronotick_time_fix6',          # EXPERIMENT-14: Fix 6 (NTP-anchored + predicted drift)
+        'chronotick_time_fix7',          # EXPERIMENT-14: Fix 7 (Hybrid: NTP + offset delta + drift)
         'chronotick_offset_ms',
         'chronotick_drift_rate',         # V3: NEW - drift rate in s/s
         'chronotick_drift_uncertainty',  # EXPERIMENT-14: Drift uncertainty in s/s
@@ -398,6 +400,9 @@ def main():
     last_ntp_offset_ms = None      # Last NTP offset in ms
     last_ntp_elapsed = None        # Elapsed time at last NTP
     system_clock_drift_rate = 0.0  # System clock drift rate in s/s
+
+    # EXPERIMENT-14: Fix 7 tracking (hybrid NTP + offset delta)
+    last_ntp_offset = None         # Last ChronoTick offset prediction in seconds (for fix7)
 
     while True:
         elapsed = time.time() - test_start_time
@@ -463,6 +468,27 @@ def main():
                                    offset_optimistic +
                                    drift_optimistic * time_delta)
 
+            # EXPERIMENT-14: FIX 6 - NTP-anchored with predicted drift (original proposal fix3)
+            if last_ntp_true_time is not None and last_ntp_system_time is not None:
+                elapsed_since_ntp = system_time - last_ntp_system_time
+                chronotick_time_fix6 = (last_ntp_true_time +
+                                       elapsed_since_ntp +
+                                       correction.drift_rate * elapsed_since_ntp)
+            else:
+                chronotick_time_fix6 = chronotick_time_fix1
+
+            # EXPERIMENT-14: FIX 7 - Hybrid NTP anchor + offset delta + predicted drift (original proposal fix4)
+            if last_ntp_true_time is not None and last_ntp_system_time is not None:
+                elapsed_since_ntp = system_time - last_ntp_system_time
+                # Calculate offset change since last NTP measurement
+                offset_delta = correction.offset_correction - last_ntp_offset if last_ntp_offset is not None else 0.0
+                chronotick_time_fix7 = (last_ntp_true_time +
+                                       elapsed_since_ntp +
+                                       offset_delta +
+                                       correction.drift_rate * elapsed_since_ntp)
+            else:
+                chronotick_time_fix7 = chronotick_time_fix1
+
         except Exception as e:
             # Log the exception for debugging
             if sample_number % 60 == 0:  # Log every minute to avoid spam
@@ -472,6 +498,8 @@ def main():
             chronotick_time_fix3 = system_time  # EXPERIMENT-14
             chronotick_time_fix4 = system_time  # EXPERIMENT-14
             chronotick_time_fix5 = system_time  # EXPERIMENT-14
+            chronotick_time_fix6 = system_time  # EXPERIMENT-14
+            chronotick_time_fix7 = system_time  # EXPERIMENT-14
             chronotick_offset_ms = 0.0
             chronotick_drift_rate = 0.0
             chronotick_drift_uncertainty = 0.0  # EXPERIMENT-14
@@ -530,6 +558,7 @@ def main():
                     # Update tracking variables for next calculation
                     last_ntp_offset_ms = ntp_offset_ms
                     last_ntp_elapsed = elapsed
+                    last_ntp_offset = correction.offset_correction  # For fix7
 
                     # V3: Enhanced logging showing both fixes
                     print(f"[{elapsed:6.1f}s] 📡 NTP: offset={ntp_offset_ms:>8.2f}ms ± {ntp_uncertainty_ms:.2f}ms "
@@ -561,6 +590,8 @@ def main():
             chronotick_time_fix3,           # EXPERIMENT-14: NEW
             chronotick_time_fix4,           # EXPERIMENT-14: NEW
             chronotick_time_fix5,           # EXPERIMENT-14: NEW
+            chronotick_time_fix6,           # EXPERIMENT-14: NEW
+            chronotick_time_fix7,           # EXPERIMENT-14: NEW
             chronotick_offset_ms,
             chronotick_drift_rate,          # V3: NEW
             chronotick_drift_uncertainty,   # EXPERIMENT-14: NEW
