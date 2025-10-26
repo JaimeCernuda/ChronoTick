@@ -320,6 +320,13 @@ class DatasetManager:
         self.drift_calculation_count = 0
         self.drift_rate_history = []  # For statistical analysis
 
+        # Uncertainty Calibration: Track prediction errors vs uncertainties
+        self.calibration_samples = []  # List of (error, raw_uncertainty) tuples
+        self.calibration_multiplier = 1.0  # Platform-specific uncertainty multiplier
+        self.is_calibrated = False  # Whether we have enough samples for calibration
+        self.min_calibration_samples = 20  # Minimum NTP measurements for calibration
+        self.calibration_update_count = 0  # Track calibration updates
+
     def calculate_drift_rate(self, prev_measurement: NTPMeasurement,
                             curr_measurement: NTPMeasurement) -> float:
         """
@@ -489,6 +496,26 @@ class DatasetManager:
             logger.info(f"  Source: ntp_measurement")
             logger.info(f"  Dataset size: {len(self.measurement_dataset)} entries")
             logger.info(f"  Drift history: {len(self.drift_rates)} entries")
+
+            # Uncertainty Calibration: Compare recent predictions to this NTP measurement
+            if not self.is_calibrated:
+                # Look for predictions within ±2 seconds of this NTP measurement
+                ntp_ts = int(measurement.timestamp)
+                for ts_check in range(ntp_ts - 2, ntp_ts + 3):
+                    if ts_check in self.measurement_dataset:
+                        entry = self.measurement_dataset[ts_check]
+                        if entry['source'].startswith('prediction_') and entry.get('uncertainty') is not None:
+                            # Calculate prediction error
+                            prediction_error = abs(entry['offset'] - measurement.offset)
+                            raw_uncertainty = entry['uncertainty']
+
+                            # Add calibration sample
+                            self.add_calibration_sample(prediction_error, raw_uncertainty)
+
+                            logger.info(f"[CALIBRATION] Sample added: error={prediction_error*1000:.3f}ms, "
+                                       f"raw_unc={raw_uncertainty*1000:.3f}ms, "
+                                       f"samples={len(self.calibration_samples)}/{self.min_calibration_samples}")
+                            break  # Only use closest prediction
 
     def add_prediction(self, timestamp: float, offset: float, drift: float,
                       source: str, uncertainty: float, confidence: float, was_capped: bool = False):
@@ -1406,7 +1433,69 @@ class DatasetManager:
             # Return the most recent (highest timestamp)
             candidates.sort(key=lambda x: x[0], reverse=True)
             return candidates[0][1]
-    
+
+    def add_calibration_sample(self, prediction_error: float, raw_uncertainty: float):
+        """
+        Add a calibration sample for uncertainty calibration.
+
+        During warmup, collects (error, uncertainty) pairs to learn platform-specific
+        calibration multiplier.
+
+        Args:
+            prediction_error: Absolute error between prediction and NTP (seconds)
+            raw_uncertainty: Raw uncertainty from TimesFM quantiles (seconds)
+        """
+        with self.lock:
+            self.calibration_samples.append((prediction_error, raw_uncertainty))
+
+            # Try to calculate calibration multiplier if we have enough samples
+            if not self.is_calibrated and len(self.calibration_samples) >= self.min_calibration_samples:
+                self._update_calibration_multiplier()
+
+    def _update_calibration_multiplier(self):
+        """
+        Calculate calibration multiplier from collected samples.
+
+        Method: multiplier = p68(errors) / median(raw_uncertainties)
+        This ensures 68% coverage at 1σ level.
+        """
+        with self.lock:
+            if len(self.calibration_samples) < self.min_calibration_samples:
+                logger.warning(f"[CALIBRATION] Insufficient samples: {len(self.calibration_samples)}/{self.min_calibration_samples}")
+                return
+
+            errors = [e for e, u in self.calibration_samples]
+            uncertainties = [u for e, u in self.calibration_samples]
+
+            # Calculate target: 68th percentile of errors (should be at 1σ)
+            p68_error = np.percentile(errors, 68)
+            median_unc = np.median(uncertainties)
+
+            if median_unc > 0:
+                # Calculate multiplier
+                self.calibration_multiplier = p68_error / median_unc
+                self.is_calibrated = True
+                self.calibration_update_count += 1
+
+                logger.info(f"[CALIBRATION] ✅ Calibration complete!")
+                logger.info(f"[CALIBRATION]   Samples: {len(self.calibration_samples)}")
+                logger.info(f"[CALIBRATION]   p68 error: {p68_error*1000:.4f} ms")
+                logger.info(f"[CALIBRATION]   Median raw uncertainty: {median_unc*1000:.4f} ms")
+                logger.info(f"[CALIBRATION]   Multiplier: {self.calibration_multiplier:.2f}x")
+                logger.info(f"[CALIBRATION]   All future uncertainties will be scaled by {self.calibration_multiplier:.2f}x")
+            else:
+                logger.error(f"[CALIBRATION] Cannot calibrate: median_unc={median_unc}")
+
+    def get_calibration_multiplier(self) -> float:
+        """Get current calibration multiplier."""
+        with self.lock:
+            return self.calibration_multiplier
+
+    def is_uncertainty_calibrated(self) -> bool:
+        """Check if uncertainty calibration is active."""
+        with self.lock:
+            return self.is_calibrated
+
     def get_recent_ntp_baseline(self, lookback_count: int = 10) -> Optional[float]:
         """
         Calculate the recent NTP baseline for offset normalization.
