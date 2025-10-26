@@ -358,6 +358,9 @@ def main():
         'system_time',
         'chronotick_time_fix1',          # V3: Fix 1 (system_time + offset + drift*delta)
         'chronotick_time_fix2',          # V3: Fix 2 (ntp_anchor + elapsed + drift*elapsed)
+        'chronotick_time_fix3',          # EXPERIMENT-14: Fix 3 (offset-only, no drift)
+        'chronotick_time_fix4',          # EXPERIMENT-14: Fix 4 (pessimistic bound)
+        'chronotick_time_fix5',          # EXPERIMENT-14: Fix 5 (optimistic bound)
         'chronotick_offset_ms',
         'chronotick_drift_rate',         # V3: NEW - drift rate in s/s
         'chronotick_drift_uncertainty',  # EXPERIMENT-14: Drift uncertainty in s/s
@@ -443,12 +446,32 @@ def main():
                 chronotick_time_fix2 = chronotick_time_fix1
                 time_since_ntp_s = 0.0
 
+            # EXPERIMENT-14: FIX 3 - Offset-only (no drift) - baseline
+            chronotick_time_fix3 = system_time + correction.offset_correction
+
+            # EXPERIMENT-14: FIX 4 - Pessimistic bound (lower uncertainty bound)
+            offset_pessimistic = correction.offset_correction - correction.offset_uncertainty
+            drift_pessimistic = correction.drift_rate - chronotick_drift_uncertainty
+            chronotick_time_fix4 = (system_time +
+                                   offset_pessimistic +
+                                   drift_pessimistic * time_delta)
+
+            # EXPERIMENT-14: FIX 5 - Optimistic bound (upper uncertainty bound)
+            offset_optimistic = correction.offset_correction + correction.offset_uncertainty
+            drift_optimistic = correction.drift_rate + chronotick_drift_uncertainty
+            chronotick_time_fix5 = (system_time +
+                                   offset_optimistic +
+                                   drift_optimistic * time_delta)
+
         except Exception as e:
             # Log the exception for debugging
             if sample_number % 60 == 0:  # Log every minute to avoid spam
                 print(f"  ⚠️  ChronoTick prediction error at sample {sample_number}: {type(e).__name__}: {e}")
             chronotick_time_fix1 = system_time
             chronotick_time_fix2 = system_time
+            chronotick_time_fix3 = system_time  # EXPERIMENT-14
+            chronotick_time_fix4 = system_time  # EXPERIMENT-14
+            chronotick_time_fix5 = system_time  # EXPERIMENT-14
             chronotick_offset_ms = 0.0
             chronotick_drift_rate = 0.0
             chronotick_drift_uncertainty = 0.0  # EXPERIMENT-14
@@ -527,7 +550,7 @@ def main():
                 if ntp_sample_count == 0:
                     print(f"⚠️  Multi-server NTP query failed at {elapsed:.1f}s: {e}")
 
-        # Log to CSV (V3: New columns for Fix 1 & Fix 2 analysis + system clock drift + EXPERIMENT-14 drift fields)
+        # Log to CSV (V3: New columns for Fix 1 & Fix 2 analysis + system clock drift + EXPERIMENT-14 drift fields + time_fix3/4/5)
         csv_writer.writerow([
             sample_number,
             elapsed,
@@ -535,6 +558,9 @@ def main():
             system_time,
             chronotick_time_fix1,           # V3: NEW
             chronotick_time_fix2,           # V3: NEW
+            chronotick_time_fix3,           # EXPERIMENT-14: NEW
+            chronotick_time_fix4,           # EXPERIMENT-14: NEW
+            chronotick_time_fix5,           # EXPERIMENT-14: NEW
             chronotick_offset_ms,
             chronotick_drift_rate,          # V3: NEW
             chronotick_drift_uncertainty,   # EXPERIMENT-14: NEW
