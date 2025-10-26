@@ -861,7 +861,11 @@ class ClockMeasurementCollector:
                 
                 # Take NTP measurement
                 measurement = self.ntp_client.get_best_measurement()
-                
+
+                # EXPERIMENT-14 DEBUG: Log collection attempt
+                logger.info(f"[NTP_COLLECTOR_LOOP] {phase} phase: get_best_measurement() returned "
+                           f"{'VALID' if measurement else 'None'}")
+
                 if measurement:
                     with self.lock:
                         self.last_measurement = measurement
