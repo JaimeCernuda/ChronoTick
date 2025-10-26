@@ -369,7 +369,9 @@ def main():
         'chronotick_drift_uncertainty',  # EXPERIMENT-14: Drift uncertainty in s/s
         'chronotick_drift_source',       # EXPERIMENT-14: Source of drift (timesfm_predicted/ntp_calculated)
         'chronotick_prediction_time',    # V3: NEW - when prediction was made
-        'chronotick_uncertainty_ms',
+        'chronotick_uncertainty_ms',     # Calibrated uncertainty
+        'chronotick_raw_uncertainty_ms', # Raw uncertainty from TimesFM before calibration
+        'chronotick_calibration_multiplier',  # Platform-specific calibration multiplier
         'chronotick_confidence',
         'chronotick_source',
         'time_since_ntp_s',              # V3: NEW - seconds since last NTP anchor
@@ -428,7 +430,11 @@ def main():
             chronotick_drift_uncertainty = getattr(correction, 'drift_uncertainty', 0.0)  # EXPERIMENT-14
             chronotick_drift_source = "timesfm_predicted"  # EXPERIMENT-14: Only TimesFM (no fallbacks)
             chronotick_prediction_time = correction.prediction_time
-            chronotick_uncertainty_ms = correction.offset_uncertainty * 1000
+            chronotick_uncertainty_ms = correction.offset_uncertainty * 1000  # Calibrated uncertainty
+            chronotick_raw_uncertainty_ms = (correction.raw_offset_uncertainty * 1000
+                                             if correction.raw_offset_uncertainty is not None else "")
+            chronotick_calibration_multiplier = (correction.calibration_multiplier
+                                                 if correction.calibration_multiplier is not None else "")
             chronotick_confidence = correction.confidence
             chronotick_source = correction.source
 
@@ -527,6 +533,8 @@ def main():
             chronotick_drift_source = "error"  # EXPERIMENT-14
             chronotick_prediction_time = system_time
             chronotick_uncertainty_ms = 0.0
+            chronotick_raw_uncertainty_ms = 0.0
+            chronotick_calibration_multiplier = 0.0
             chronotick_confidence = 0.0
             chronotick_source = "error"
             time_since_ntp_s = 0.0
@@ -621,7 +629,7 @@ def main():
                 if ntp_sample_count == 0:
                     print(f"⚠️  Multi-server NTP query failed at {elapsed:.1f}s: {e}")
 
-        # Log to CSV (V3: New columns for Fix 1 & Fix 2 analysis + system clock drift + EXPERIMENT-14 drift fields + time_fix3/4/5)
+        # Log to CSV (V3: New columns for Fix 1 & Fix 2 analysis + system clock drift + EXPERIMENT-14 drift fields + time_fix3/4/5 + calibration)
         csv_writer.writerow([
             sample_number,
             elapsed,
@@ -640,7 +648,9 @@ def main():
             chronotick_drift_uncertainty,   # EXPERIMENT-14: NEW
             chronotick_drift_source,        # EXPERIMENT-14: NEW
             chronotick_prediction_time,     # V3: NEW
-            chronotick_uncertainty_ms,
+            chronotick_uncertainty_ms,      # Calibrated uncertainty
+            chronotick_raw_uncertainty_ms,  # Raw uncertainty before calibration
+            chronotick_calibration_multiplier,  # Calibration multiplier
             chronotick_confidence,
             chronotick_source,
             time_since_ntp_s,               # V3: NEW

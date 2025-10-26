@@ -20,11 +20,13 @@ class PredictionWithUncertainty:
     Attributes:
         offset: Clock offset correction (seconds)
         drift: Drift rate (seconds per second)
-        offset_uncertainty: Offset uncertainty bounds (seconds)
+        offset_uncertainty: Calibrated offset uncertainty bounds (seconds)
         drift_uncertainty: Drift uncertainty bounds (seconds/second)
         confidence: Prediction confidence [0,1]
         timestamp: Prediction timestamp
         quantiles: Optional prediction quantiles (e.g., {'0.1': val, '0.5': val, '0.9': val})
+        raw_offset_uncertainty: Raw uncertainty from TimesFM before calibration (seconds)
+        calibration_multiplier: Platform-specific calibration multiplier applied to uncertainties
     """
     offset: float
     drift: float
@@ -33,6 +35,8 @@ class PredictionWithUncertainty:
     confidence: float = 0.95
     timestamp: float = 0.0
     quantiles: Optional[Dict[str, float]] = None
+    raw_offset_uncertainty: Optional[float] = None
+    calibration_multiplier: Optional[float] = None
 
 
 class TSFMModelWrapper:
@@ -278,25 +282,20 @@ class TSFMModelWrapper:
                 offset = offset_residual
 
             # EXPERIMENT-14: Extract drift prediction from batch forecasting
-            drift_us_per_s = self.current_drift  # Default fallback to current drift estimate
-            drift_source = "ntp_calc_fallback"
+            # NO FALLBACKS - TimesFM must provide drift predictions or system fails
+            if prediction_result.drift_predictions is None or i >= len(prediction_result.drift_predictions):
+                error_msg = f"[BATCH_CONVERT] ❌ CRITICAL: No drift predictions from TimesFM batch forecasting (index {i})"
+                logger.error(error_msg)
+                logger.error("[BATCH_CONVERT] System requires drift predictions - NO FALLBACKS allowed for research integrity")
+                raise RuntimeError(error_msg)
 
-            if prediction_result.drift_predictions is not None and i < len(prediction_result.drift_predictions):
-                # Use predicted drift from TimesFM batch forecasting
-                drift_us_per_s = float(prediction_result.drift_predictions[i])
-                drift_source = "timesfm_batch"
-                if i == 0:  # Log first prediction only
-                    logger.info(f"[BATCH_CONVERT] ✅ Using TimesFM drift predictions from batch forecasting")
-            else:
-                # Fallback: approximate from consecutive offset predictions if no drift predicted
-                if i < num_predictions - 1:
-                    drift_us_per_s = float(prediction_result.predictions[i + 1] - prediction_result.predictions[i]) * 1e6
-                    drift_source = "offset_approx"
-                elif i > 0:
-                    drift_us_per_s = float(prediction_result.predictions[i] - prediction_result.predictions[i - 1]) * 1e6
-                    drift_source = "offset_approx"
-                if i == 0:  # Log warning once
-                    logger.warning(f"[BATCH_CONVERT] ⚠ No drift predictions available from model - using fallback")
+            # Use predicted drift from TimesFM batch forecasting (ONLY source)
+            drift_us_per_s = float(prediction_result.drift_predictions[i])
+            drift_source = "timesfm_predicted"
+
+            if i == 0:  # Log first prediction only
+                logger.info(f"[BATCH_CONVERT] ✅ Using TimesFM drift predictions from batch forecasting")
+                logger.info(f"[BATCH_CONVERT]   Source: {drift_source} (NO FALLBACKS - research mode)")
 
             # Convert drift from μs/s to s/s for PredictionWithUncertainty
             drift_s_per_s = drift_us_per_s * 1e-6
@@ -308,10 +307,11 @@ class TSFMModelWrapper:
                 logger.info(f"[BATCH_CONVERT]   Source: {drift_source}")
 
             # Get uncertainty - CRITICAL FOR UNCERTAINTY QUANTIFICATION
+            raw_offset_uncertainty = None
             if prediction_result.uncertainty is not None and i < len(prediction_result.uncertainty):
-                offset_uncertainty = float(prediction_result.uncertainty[i])
+                raw_offset_uncertainty = float(prediction_result.uncertainty[i])
                 if i == 0:  # Log first prediction only
-                    logger.info(f"[UNCERTAINTY] ✅ Model provided uncertainty: {offset_uncertainty*1000:.3f}ms")
+                    logger.info(f"[UNCERTAINTY] ✅ Model provided raw uncertainty: {raw_offset_uncertainty*1000:.3f}ms")
             else:
                 # CRITICAL ERROR: Model must provide uncertainty for proper uncertainty quantification
                 # Silent fallback was causing all uncertainties to be 1.0ms (see UNCERTAINTY_BUG_DEEPER_ROOT_CAUSE.md)
@@ -321,7 +321,18 @@ class TSFMModelWrapper:
                     logger.error(f"[UNCERTAINTY] This indicates quantile prediction is not enabled in the model")
                     logger.error(f"[UNCERTAINTY] See UNCERTAINTY_BUG_DEEPER_ROOT_CAUSE.md for fix instructions")
                     logger.error(f"[UNCERTAINTY] Falling back to 1.0ms (THIS IS WRONG AND MUST BE FIXED!)")
-                offset_uncertainty = 0.001  # 1ms fallback - THIS SHOULD NOT HAPPEN
+                raw_offset_uncertainty = 0.001  # 1ms fallback - THIS SHOULD NOT HAPPEN
+
+            # UNCERTAINTY CALIBRATION: Apply platform-specific multiplier
+            calibration_multiplier = self.dataset_manager.get_calibration_multiplier()
+            offset_uncertainty = raw_offset_uncertainty * calibration_multiplier
+            if i == 0:  # Log calibration once per prediction batch
+                is_calibrated = self.dataset_manager.is_uncertainty_calibrated()
+                if is_calibrated:
+                    logger.info(f"[CALIBRATION] ✅ Applying calibration multiplier: {calibration_multiplier:.2f}x")
+                    logger.info(f"[CALIBRATION]   Raw: {raw_offset_uncertainty*1000:.3f}ms → Calibrated: {offset_uncertainty*1000:.3f}ms")
+                else:
+                    logger.info(f"[CALIBRATION] ⏳ Warmup phase - no calibration applied (multiplier=1.0)")
 
             # EXPERIMENT-14: Extract drift uncertainty from batch forecasting
             if prediction_result.drift_uncertainty is not None and i < len(prediction_result.drift_uncertainty):
@@ -329,10 +340,10 @@ class TSFMModelWrapper:
                 if i == 0:  # Log first prediction only
                     logger.info(f"[BATCH_CONVERT] ✅ Model provided drift uncertainty: {drift_uncertainty*1e6:.3f} μs/s")
             else:
-                # Fallback: approximate as 10% of offset uncertainty
+                # Fallback: approximate as 10% of calibrated offset uncertainty
                 drift_uncertainty = offset_uncertainty * 0.1
                 if i == 0:  # Log warning once
-                    logger.warning(f"[BATCH_CONVERT] ⚠ No drift uncertainty from model - using offset*0.1 fallback")
+                    logger.warning(f"[BATCH_CONVERT] ⚠ No drift uncertainty from model - using calibrated_offset*0.1 fallback")
 
             # Extract quantiles for this timestep (if available)
             # DENORMALIZATION: Quantiles also need bias adjustment
@@ -351,11 +362,13 @@ class TSFMModelWrapper:
             predictions.append(PredictionWithUncertainty(
                 offset=offset,
                 drift=drift_s_per_s,
-                offset_uncertainty=offset_uncertainty,
+                offset_uncertainty=offset_uncertainty,  # Calibrated uncertainty
                 drift_uncertainty=drift_uncertainty,
                 confidence=prediction_result.confidence,  # Use confidence from engine (based on uncertainty)
                 timestamp=prediction_result.timestamp + i,
-                quantiles=quantiles_dict
+                quantiles=quantiles_dict,
+                raw_offset_uncertainty=raw_offset_uncertainty,  # Raw uncertainty from TimesFM
+                calibration_multiplier=calibration_multiplier  # Platform-specific multiplier
             ))
 
         # If we need more predictions than were generated, extrapolate

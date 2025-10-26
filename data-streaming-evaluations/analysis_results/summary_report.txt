@@ -1,0 +1,72 @@
+
+CHRONOTICK VS SYSTEM CLOCK ANALYSIS REPORT
+==========================================
+
+Generated: 2025-10-25 12:51:09
+
+DATASETS
+--------
+System Clock: results/system_clock_30min_FINAL
+  - Coordinator: 3000 events
+  - Worker B: 3000 events
+  - Worker C: 3000 events
+
+ChronoTick: results/chronotick_30min_20251025-115922
+  - Coordinator: 3000 events
+  - Worker B: 2995 events
+  - Worker C: 2996 events
+
+CAUSALITY VIOLATION ANALYSIS
+-----------------------------
+
+System Clock (Baseline):
+  Worker B: 0/3000 violations (0.00%)
+  Worker C: 0/3000 violations (0.00%)
+
+ChronoTick (with AI correction):
+  Worker B: 122/2995 violations (4.07%)
+  Worker C: 155/2996 violations (5.17%)
+
+Improvement:
+  Worker B: -122 fewer violations
+  Worker C: -155 fewer violations
+
+CHRONOTICK PREDICTION ACCURACY
+-------------------------------
+
+Worker B:
+  Mean Error: 16.769702 ms
+  Median Error: 24.392972 ms
+  MAE: 16.769702 ms
+  RMSE: 19.510587 ms
+  Within Uncertainty Bounds: 0.00%
+
+Worker C:
+  Mean Error: 17.034191 ms
+  Median Error: 22.759773 ms
+  MAE: 17.053373 ms
+  RMSE: 19.510587 ms
+  Within Uncertainty Bounds: 0.23%
+
+CHRONOTICK MODEL STATISTICS
+----------------------------
+
+Worker B:
+  Mean Offset: 1.533 ms
+  Mean Uncertainty: 0.361331 ms
+  Mean Confidence: 0.968127
+
+Worker C:
+  Mean Offset: 1.231 ms
+  Mean Uncertainty: 0.032466 ms
+  Mean Confidence: 0.945530
+
+CONCLUSIONS
+-----------
+ChronoTick shows similar violation rates to system clock
+
+Average reduction: -138.5 violations per worker
+
+ChronoTick uncertainty bounds are moderately calibrated
+(0.1% of predictions within bounds)
+

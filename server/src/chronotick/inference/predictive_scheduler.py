@@ -41,9 +41,9 @@ class CorrectionWithBounds:
     offset_correction: float
     drift_rate: float
 
-    # ML model uncertainties only
-    offset_uncertainty: float    # From TSFM offset prediction interval
-    drift_uncertainty: float     # From TSFM drift prediction interval
+    # ML model uncertainties (calibrated)
+    offset_uncertainty: float    # Calibrated offset uncertainty from TSFM
+    drift_uncertainty: float     # Drift uncertainty from TSFM
 
     # Metadata
     prediction_time: float       # When this prediction was made
@@ -53,6 +53,10 @@ class CorrectionWithBounds:
 
     # Optional quantiles for confidence intervals
     quantiles: Optional[Dict[str, float]] = None  # e.g., {'0.1': val, '0.5': val, '0.9': val}
+
+    # Uncertainty calibration metadata
+    raw_offset_uncertainty: Optional[float] = None   # Raw uncertainty before calibration
+    calibration_multiplier: Optional[float] = None   # Platform-specific multiplier
     
     def get_time_uncertainty(self, time_delta: float) -> float:
         """Calculate time uncertainty using error propagation"""
@@ -423,7 +427,9 @@ class PredictiveScheduler:
                     valid_until=end_time,
                     confidence=pred.confidence,
                     source=pred.source if hasattr(pred, 'source') else "cpu",  # Use actual source from prediction
-                    quantiles=pred.quantiles  # Pass quantiles from prediction
+                    quantiles=pred.quantiles,  # Pass quantiles from prediction
+                    raw_offset_uncertainty=pred.raw_offset_uncertainty,  # Calibration metadata
+                    calibration_multiplier=pred.calibration_multiplier  # Calibration metadata
                 )
 
                 # Cache for API serving
@@ -514,7 +520,9 @@ class PredictiveScheduler:
                     valid_until=end_time,
                     confidence=pred.confidence,
                     source=pred.source if hasattr(pred, 'source') else "gpu",  # Use actual source from prediction
-                    quantiles=pred.quantiles  # Pass quantiles from prediction
+                    quantiles=pred.quantiles,  # Pass quantiles from prediction
+                    raw_offset_uncertainty=pred.raw_offset_uncertainty,  # Calibration metadata
+                    calibration_multiplier=pred.calibration_multiplier  # Calibration metadata
                 )
 
                 # Cache for API serving
@@ -652,7 +660,9 @@ class PredictiveScheduler:
             valid_until=correction.valid_until,
             confidence=correction.confidence,
             source=correction.source,
-            quantiles=correction.quantiles
+            quantiles=correction.quantiles,
+            raw_offset_uncertainty=correction.raw_offset_uncertainty,  # Preserve calibration metadata
+            calibration_multiplier=correction.calibration_multiplier  # Preserve calibration metadata
         )
 
     def get_correction_at_time(self, current_time: float) -> Optional[CorrectionWithBounds]:
