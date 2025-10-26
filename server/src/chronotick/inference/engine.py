@@ -253,12 +253,12 @@ class ChronoTickInferenceEngine:
                 if len(processed_drift) > context_length:
                     processed_drift = processed_drift[-context_length:]
 
-                # EXPERIMENT-14: TimesFM batch forecasting expects inputs as a LIST of series, not a stacked array
+                # EXPERIMENT-14: TimesFM batch forecasting - pass list as first positional argument "context"
                 logger.info(f"[BATCH_FORECAST]   Calling TimesFM with batch inputs (list of 2 series: offset + drift)")
 
                 result = self.short_term_model.forecast(
-                    inputs=[processed_history, processed_drift],  # LIST for batch forecasting
-                    horizon=horizon,
+                    [processed_history, processed_drift],  # LIST for batch forecasting (context parameter)
+                    horizon,
                     freq=self.frequency_info.freq_value
                 )
                 logger.info(f"[BATCH_FORECAST]   Batch forecast complete")
@@ -414,12 +414,12 @@ class ChronoTickInferenceEngine:
                 if len(processed_drift) > context_length:
                     processed_drift = processed_drift[-context_length:]
 
-                # EXPERIMENT-14: TimesFM batch forecasting expects inputs as a LIST of series, not a stacked array
+                # EXPERIMENT-14: TimesFM batch forecasting - pass list as first positional argument "context"
                 logger.info(f"[BATCH_FORECAST_LT]   Calling TimesFM with batch inputs (list of 2 series: offset + drift)")
 
                 result = self.long_term_model.forecast(
-                    inputs=[processed_history, processed_drift],  # LIST for batch forecasting
-                    horizon=horizon,
+                    [processed_history, processed_drift],  # LIST for batch forecasting (context parameter)
+                    horizon,
                     freq=self.frequency_info.freq_value
                 )
                 logger.info(f"[BATCH_FORECAST_LT]   Batch forecast complete")

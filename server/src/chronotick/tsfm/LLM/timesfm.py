@@ -143,13 +143,17 @@ class TimesFMModel(BaseTimeSeriesModel):
             raise RuntimeError(error_msg)
     
     @debug_log_call
-    def forecast(self, context: Union[np.ndarray, List[float]],
+    def forecast(self, context: Union[np.ndarray, List[float], List[np.ndarray]],
                  horizon: int, **kwargs) -> ForecastOutput:
         """
         Generate forecasts using TimesFM.
 
+        EXPERIMENT-14: Now supports batch forecasting when context is a list of arrays.
+
         Args:
             context: Historical time series data
+                    - Single series: 1D numpy array or list of floats
+                    - Batch series: List of 1D numpy arrays (for batch forecasting)
             horizon: Number of steps to forecast
             **kwargs: Additional parameters (freq for frequency)
 
@@ -165,8 +169,17 @@ class TimesFMModel(BaseTimeSeriesModel):
                 raise RuntimeError(self._dependency_error)
             else:
                 raise RuntimeError("TimesFM model not loaded. Call load_model() first.")
-        
+
         try:
+            # EXPERIMENT-14: Check if this is batch forecasting (list of arrays)
+            is_batch = isinstance(context, list) and len(context) > 0 and isinstance(context[0], np.ndarray)
+
+            if is_batch:
+                # EXPERIMENT-14: Batch forecasting mode
+                logger.info(f"[BATCH_FORECAST_WRAPPER] Batch forecasting with {len(context)} series")
+                return self._forecast_batch(context, horizon, **kwargs)
+
+            # Standard single-series forecasting
             # Validate input
             context = self.validate_input(context)
 
@@ -309,12 +322,105 @@ class TimesFMModel(BaseTimeSeriesModel):
                     'timesfm_version': '2.5'
                 }
             )
-            
+
         except Exception as e:
             import traceback
             logger.error(f"TimesFM forecasting error: {e}")
             logger.error(f"Full traceback:\n{traceback.format_exc()}")
             raise RuntimeError(f"TimesFM forecasting failed: {e}")
+
+    def _forecast_batch(self, contexts: List[np.ndarray], horizon: int, **kwargs) -> ForecastOutput:
+        """
+        EXPERIMENT-14: Batch forecasting for multiple series (e.g., offset + drift).
+
+        Args:
+            contexts: List of 1D numpy arrays, one per series
+            horizon: Number of steps to forecast
+            **kwargs: Additional parameters (freq for frequency)
+
+        Returns:
+            ForecastOutput with batch predictions (shape: (num_series, horizon))
+        """
+        try:
+            # Get frequency from kwargs
+            freq = kwargs.get('freq', 0)
+
+            # Ensure all series are 1D and pad if necessary
+            prepared_contexts = []
+            for i, ctx in enumerate(contexts):
+                if ctx.ndim != 1:
+                    raise ValueError(f"EXPERIMENT-14: Series {i} must be 1D, got shape {ctx.shape}")
+
+                # Pad if too short
+                min_context_len = self.min_context_len
+                if len(ctx) < min_context_len:
+                    logger.warning(f"Series {i}: length {len(ctx)} < minimum {min_context_len}, padding with zeros")
+                    padding = np.zeros(min_context_len - len(ctx), dtype=np.float32)
+                    ctx = np.concatenate([padding, ctx])
+
+                prepared_contexts.append(ctx)
+
+            logger.info(f"[BATCH_FORECAST_WRAPPER] Calling TimesFM with {len(prepared_contexts)} series, horizon={horizon}")
+            for i, ctx in enumerate(prepared_contexts):
+                logger.info(f"[BATCH_FORECAST_WRAPPER]   Series {i}: length={len(ctx)}, range=[{ctx.min():.6f}, {ctx.max():.6f}]")
+
+            # Import torch for operations
+            import torch
+
+            # Call TimesFM batch forecasting API
+            point_forecast, quantile_forecast = self.tfm.forecast(
+                horizon=horizon,
+                inputs=prepared_contexts  # List of numpy arrays
+            )
+
+            logger.info(f"[BATCH_FORECAST_WRAPPER] TimesFM returned point_forecast type: {type(point_forecast)}")
+            if isinstance(point_forecast, torch.Tensor):
+                logger.info(f"[BATCH_FORECAST_WRAPPER] Point forecast shape: {point_forecast.shape}")
+            elif isinstance(point_forecast, np.ndarray):
+                logger.info(f"[BATCH_FORECAST_WRAPPER] Point forecast shape: {point_forecast.shape}")
+
+            # Convert to numpy if needed
+            if isinstance(point_forecast, torch.Tensor):
+                point_forecast = point_forecast.detach().cpu().numpy()
+            if quantile_forecast is not None and isinstance(quantile_forecast, torch.Tensor):
+                quantile_forecast = quantile_forecast.detach().cpu().numpy()
+
+            # Verify batch shape
+            if point_forecast.ndim != 2 or point_forecast.shape[0] != len(contexts):
+                logger.error(f"[BATCH_FORECAST_WRAPPER] Unexpected shape: {point_forecast.shape}, expected ({len(contexts)}, {horizon})")
+                raise ValueError(f"Batch forecast returned unexpected shape: {point_forecast.shape}")
+
+            logger.info(f"[BATCH_FORECAST_WRAPPER] ✅ Batch forecast successful: shape {point_forecast.shape}")
+
+            # Extract quantiles if available
+            quantiles = None
+            if quantile_forecast is not None:
+                # quantile_forecast shape: (num_series, horizon, num_quantiles)
+                logger.info(f"[BATCH_FORECAST_WRAPPER] Quantile forecast shape: {quantile_forecast.shape}")
+                # For now, return raw quantile array - engine.py will unpack per-series
+                quantiles = quantile_forecast
+
+            return ForecastOutput(
+                predictions=point_forecast,  # Shape: (num_series, horizon)
+                quantiles=quantiles,          # Shape: (num_series, horizon, num_quantiles) or None
+                metadata={
+                    'model_name': self.model_name,
+                    'model_repo': self.model_repo,
+                    'forecast_horizon': horizon,
+                    'num_series': len(contexts),
+                    'series_lengths': [len(ctx) for ctx in contexts],
+                    'device': self.device,
+                    'freq': freq,
+                    'batch_forecasting': True,  # EXPERIMENT-14 marker
+                    'timesfm_version': '2.5'
+                }
+            )
+
+        except Exception as e:
+            import traceback
+            logger.error(f"[BATCH_FORECAST_WRAPPER] Batch forecasting error: {e}")
+            logger.error(f"Full traceback:\n{traceback.format_exc()}")
+            raise RuntimeError(f"TimesFM batch forecasting failed: {e}")
 
     def forecast_multivariate(self, multivariate_input, horizon: int, **kwargs):
         """
