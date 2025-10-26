@@ -25,7 +25,7 @@ clock_measurement:
     timeout_seconds: 2.0
     # Phase 1: NTP Outlier Rejection
     outlier_window_size: 20
-    outlier_sigma_threshold: 5.0  # Increased from 3.0 to 5.0σ for adaptive filter
+    outlier_sigma_threshold: 10000.0  # Effectively disabled for unsynchronized clock experiments
     # NEW: Parallel queries and fallback/retry
     parallel_queries: true  # Query servers in parallel (28-58x faster!)
     max_workers: 10  # Thread pool size for parallel queries
