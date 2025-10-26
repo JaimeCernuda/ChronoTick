@@ -871,11 +871,16 @@ class ClockMeasurementCollector:
                             measurement.offset,
                             measurement.uncertainty
                         ))
-                        
+
                         # Manage storage size
                         if len(self.offset_measurements) > 1000:
                             self.offset_measurements = self.offset_measurements[-500:]
-                    
+
+                        # EXPERIMENT-14 DEBUG: Log storage to diagnose NTP collection bug
+                        logger.info(f"[NTP_COLLECTOR_STORE] {phase} measurement stored: "
+                                   f"ts={measurement.timestamp:.0f}, offset={measurement.offset*1e6:.1f}μs, "
+                                   f"total_measurements={len(self.offset_measurements)}")
+
                     logger.debug(f"Collected {phase} measurement: "
                                f"offset={measurement.offset*1e6:.1f}μs")
                 else:
@@ -906,9 +911,19 @@ class ClockMeasurementCollector:
         with self.lock:
             current_time = time.time()
             cutoff_time = current_time - window_seconds
-            
-            return [(ts, offset, uncertainty) for ts, offset, uncertainty in self.offset_measurements 
-                   if ts >= cutoff_time]
+
+            recent = [(ts, offset, uncertainty) for ts, offset, uncertainty in self.offset_measurements
+                     if ts >= cutoff_time]
+
+            # EXPERIMENT-14 DEBUG: Log retrieval to diagnose NTP collection bug
+            if self.offset_measurements:
+                oldest_ts = min(ts for ts, _, _ in self.offset_measurements)
+                newest_ts = max(ts for ts, _, _ in self.offset_measurements)
+                logger.debug(f"[NTP_COLLECTOR_GET] window={window_seconds}s, cutoff={cutoff_time:.0f}, "
+                            f"total_stored={len(self.offset_measurements)} (ts range: {oldest_ts:.0f}-{newest_ts:.0f}), "
+                            f"returned={len(recent)}")
+
+            return recent
 
 
 def create_test_collector():
