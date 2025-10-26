@@ -363,6 +363,7 @@ def main():
         'chronotick_time_fix5',          # EXPERIMENT-14: Fix 5 (optimistic bound)
         'chronotick_time_fix6',          # EXPERIMENT-14: Fix 6 (NTP-anchored + predicted drift)
         'chronotick_time_fix7',          # EXPERIMENT-14: Fix 7 (Hybrid: NTP + offset delta + drift)
+        'chronotick_time_fix11',         # EXPERIMENT-14: Fix 11 (Uncertainty-gated: Fix3 or Fix6)
         'chronotick_offset_ms',
         'chronotick_drift_rate',         # V3: NEW - drift rate in s/s
         'chronotick_drift_uncertainty',  # EXPERIMENT-14: Drift uncertainty in s/s
@@ -489,6 +490,25 @@ def main():
             else:
                 chronotick_time_fix7 = chronotick_time_fix1
 
+            # EXPERIMENT-14: FIX 11 - UNCERTAINTY-GATED (Switch between Fix3 and Fix6 based on drift uncertainty)
+            # CRITICAL: Use corrected uncertainty (×1000 for microseconds)
+            if last_ntp_true_time is not None and last_ntp_system_time is not None:
+                elapsed_since_ntp = system_time - last_ntp_system_time
+                drift_unc_corrected = correction.drift_uncertainty * 1000 / 1e6  # μs/s → s/s
+                drift_unc_contribution = drift_unc_corrected * elapsed_since_ntp  # seconds
+
+                # 10ms threshold for switching
+                if drift_unc_contribution > 0.010:  # 10ms
+                    # High uncertainty → use offset-only (Fix3)
+                    chronotick_time_fix11 = system_time + (correction.offset_correction / 1000)
+                else:
+                    # Low uncertainty → use NTP+drift (Fix6)
+                    chronotick_time_fix11 = (last_ntp_true_time +
+                                            elapsed_since_ntp +
+                                            correction.drift_rate * elapsed_since_ntp)
+            else:
+                chronotick_time_fix11 = chronotick_time_fix1
+
         except Exception as e:
             # Log the exception for debugging
             if sample_number % 60 == 0:  # Log every minute to avoid spam
@@ -500,6 +520,7 @@ def main():
             chronotick_time_fix5 = system_time  # EXPERIMENT-14
             chronotick_time_fix6 = system_time  # EXPERIMENT-14
             chronotick_time_fix7 = system_time  # EXPERIMENT-14
+            chronotick_time_fix11 = system_time  # EXPERIMENT-14
             chronotick_offset_ms = 0.0
             chronotick_drift_rate = 0.0
             chronotick_drift_uncertainty = 0.0  # EXPERIMENT-14
@@ -521,7 +542,28 @@ def main():
         ntp_n_rejected = ""
         ntp_rejected_servers = ""
 
-        if elapsed - last_ntp_time >= NTP_INTERVAL_SECONDS:
+        # EXPERIMENT-14: ADAPTIVE NTP FREQUENCY based on drift magnitude
+        if correction:
+            drift_magnitude_us = abs(correction.drift_rate) * 1e6  # Convert s/s to μs/s
+
+            if drift_magnitude_us > 10.0:
+                # High drift → frequent updates
+                adaptive_ntp_interval = 30
+            elif drift_magnitude_us > 1.0:
+                # Medium drift → standard updates
+                adaptive_ntp_interval = 60
+            else:
+                # Low drift → relaxed updates
+                adaptive_ntp_interval = 120
+
+            # Log adaptive interval changes (every 100 samples to avoid spam)
+            if sample_number % 100 == 0:
+                print(f"           [ADAPTIVE_NTP] Drift: {drift_magnitude_us:.2f} μs/s → NTP interval: {adaptive_ntp_interval}s")
+        else:
+            # No correction yet → use default
+            adaptive_ntp_interval = NTP_INTERVAL_SECONDS
+
+        if elapsed - last_ntp_time >= adaptive_ntp_interval:
             try:
                 print(f"[{elapsed:6.1f}s] Querying {len(ntp_servers)} NTP servers in parallel...")
                 ntp_result = ntp_client.get_averaged_measurement()
@@ -592,6 +634,7 @@ def main():
             chronotick_time_fix5,           # EXPERIMENT-14: NEW
             chronotick_time_fix6,           # EXPERIMENT-14: NEW
             chronotick_time_fix7,           # EXPERIMENT-14: NEW
+            chronotick_time_fix11,          # EXPERIMENT-14: NEW
             chronotick_offset_ms,
             chronotick_drift_rate,          # V3: NEW
             chronotick_drift_uncertainty,   # EXPERIMENT-14: NEW
