@@ -1458,33 +1458,35 @@ class DatasetManager:
 
         Method: multiplier = p68(errors) / median(raw_uncertainties)
         This ensures 68% coverage at 1σ level.
+
+        NOTE: Caller must hold self.lock before calling this method.
         """
-        with self.lock:
-            if len(self.calibration_samples) < self.min_calibration_samples:
-                logger.warning(f"[CALIBRATION] Insufficient samples: {len(self.calibration_samples)}/{self.min_calibration_samples}")
-                return
+        # Lock is already held by add_calibration_sample() caller
+        if len(self.calibration_samples) < self.min_calibration_samples:
+            logger.warning(f"[CALIBRATION] Insufficient samples: {len(self.calibration_samples)}/{self.min_calibration_samples}")
+            return
 
-            errors = [e for e, u in self.calibration_samples]
-            uncertainties = [u for e, u in self.calibration_samples]
+        errors = [e for e, u in self.calibration_samples]
+        uncertainties = [u for e, u in self.calibration_samples]
 
-            # Calculate target: 68th percentile of errors (should be at 1σ)
-            p68_error = np.percentile(errors, 68)
-            median_unc = np.median(uncertainties)
+        # Calculate target: 68th percentile of errors (should be at 1σ)
+        p68_error = np.percentile(errors, 68)
+        median_unc = np.median(uncertainties)
 
-            if median_unc > 0:
-                # Calculate multiplier
-                self.calibration_multiplier = p68_error / median_unc
-                self.is_calibrated = True
-                self.calibration_update_count += 1
+        if median_unc > 0:
+            # Calculate multiplier
+            self.calibration_multiplier = p68_error / median_unc
+            self.is_calibrated = True
+            self.calibration_update_count += 1
 
-                logger.info(f"[CALIBRATION] ✅ Calibration complete!")
-                logger.info(f"[CALIBRATION]   Samples: {len(self.calibration_samples)}")
-                logger.info(f"[CALIBRATION]   p68 error: {p68_error*1000:.4f} ms")
-                logger.info(f"[CALIBRATION]   Median raw uncertainty: {median_unc*1000:.4f} ms")
-                logger.info(f"[CALIBRATION]   Multiplier: {self.calibration_multiplier:.2f}x")
-                logger.info(f"[CALIBRATION]   All future uncertainties will be scaled by {self.calibration_multiplier:.2f}x")
-            else:
-                logger.error(f"[CALIBRATION] Cannot calibrate: median_unc={median_unc}")
+            logger.info(f"[CALIBRATION] ✅ Calibration complete!")
+            logger.info(f"[CALIBRATION]   Samples: {len(self.calibration_samples)}")
+            logger.info(f"[CALIBRATION]   p68 error: {p68_error*1000:.4f} ms")
+            logger.info(f"[CALIBRATION]   Median raw uncertainty: {median_unc*1000:.4f} ms")
+            logger.info(f"[CALIBRATION]   Multiplier: {self.calibration_multiplier:.2f}x")
+            logger.info(f"[CALIBRATION]   All future uncertainties will be scaled by {self.calibration_multiplier:.2f}x")
+        else:
+            logger.error(f"[CALIBRATION] Cannot calibrate: median_unc={median_unc}")
 
     def get_calibration_multiplier(self) -> float:
         """Get current calibration multiplier."""
