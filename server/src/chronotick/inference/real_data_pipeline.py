@@ -593,6 +593,9 @@ class DatasetManager:
         This corrects the historical dataset so that future autoregressive predictions
         automatically align with NTP ground truth.
 
+        PERFORMANCE FIX: Uses fine-grained locking to prevent blocking during corrections.
+        Lock is only held during actual data access, not during computation.
+
         Args:
             ntp_measurement: New NTP measurement (ground truth)
             method: Correction method - 'none', 'linear', 'drift_aware', or 'advanced'
@@ -613,6 +616,7 @@ class DatasetManager:
             self.add_ntp_measurement(ntp_measurement)
             return None
 
+        # PHASE 1: Acquire lock BRIEFLY to read metadata (fine-grained locking)
         with self.lock:
             # Find the most recent ML PREDICTION (not NTP!) before NTP time
             # CRITICAL FIX: Must compare NTP to ML predictions, not NTP to NTP!
@@ -622,27 +626,6 @@ class DatasetManager:
                              f"skipping correction (this is normal during early operation)")
                 self.add_ntp_measurement(ntp_measurement)
                 return None
-
-            # Calculate error: error = NTP_truth - ML_Prediction
-            error = ntp_measurement.offset - prediction_at_ntp['offset']
-
-            # DETAILED DEBUG: Show error calculation
-            logger.info(f"[NTP_CORRECTION_{method.upper()}] ═══════════════════════════════════════════")
-            logger.info(f"[NTP_CORRECTION_{method.upper()}] NEW NTP MEASUREMENT ARRIVED:")
-            logger.info(f"  NTP timestamp: {ntp_measurement.timestamp:.2f}")
-            logger.info(f"  NTP offset (ground truth): {ntp_measurement.offset*1000:.3f}ms")
-            logger.info(f"  NTP uncertainty: {ntp_measurement.uncertainty*1000:.3f}ms")
-            logger.info(f"[NTP_CORRECTION_{method.upper()}] PREDICTION AT NTP TIME:")
-            logger.info(f"  Prediction offset: {prediction_at_ntp['offset']*1000:.3f}ms")
-            logger.info(f"  Prediction source: {prediction_at_ntp['source']}")
-            logger.info(f"[NTP_CORRECTION_{method.upper()}] ERROR CALCULATION:")
-            logger.info(f"  Error = NTP_truth - Prediction")
-            logger.info(f"  Error = {ntp_measurement.offset*1000:.3f}ms - {prediction_at_ntp['offset']*1000:.3f}ms")
-            logger.info(f"  Error = {error*1000:.3f}ms")
-            if abs(error*1000) < 1.0:
-                logger.info(f"  ✓ Error is SMALL (<1ms) - prediction was accurate!")
-            else:
-                logger.info(f"  ✗ Error is LARGE (≥1ms) - prediction missed the mark!")
 
             # Find interval start (last NTP or first prediction)
             interval_start = None
@@ -656,55 +639,77 @@ class DatasetManager:
                 # No previous NTP, use first prediction
                 interval_start = min(self.measurement_dataset.keys())
 
-            interval_duration = ntp_measurement.timestamp - interval_start
+        # Lock released - now compute corrections WITHOUT holding lock
 
-            logger.info(f"[NTP_CORRECTION_{method.upper()}] CORRECTION INTERVAL:")
-            logger.info(f"  Start: {interval_start:.0f}")
-            logger.info(f"  End: {ntp_measurement.timestamp:.0f}")
-            logger.info(f"  Duration: {interval_duration:.0f}s")
-            logger.info(f"  Method: {method}")
-            logger.info(f"[NTP_CORRECTION_{method.upper()}] ═══════════════════════════════════════════")
+        # Calculate error: error = NTP_truth - ML_Prediction
+        error = ntp_measurement.offset - prediction_at_ntp['offset']
+        interval_duration = ntp_measurement.timestamp - interval_start
 
-            # Apply correction based on method
-            if method == 'linear':
-                self._apply_linear_correction(interval_start, ntp_measurement.timestamp, error)
-            elif method == 'drift_aware':
-                self._apply_drift_aware_correction(
-                    interval_start, ntp_measurement.timestamp, error,
-                    offset_uncertainty, drift_uncertainty, interval_duration
-                )
-            elif method == 'advanced':
-                self._apply_advanced_correction(
-                    interval_start, ntp_measurement.timestamp, error,
-                    ntp_measurement.uncertainty, offset_uncertainty, drift_uncertainty
-                )
-            elif method == 'advance_absolute':
-                self._apply_advance_absolute_correction(
-                    interval_start, ntp_measurement.timestamp, error,
-                    ntp_measurement.uncertainty, offset_uncertainty, drift_uncertainty, interval_duration
-                )
-            elif method == 'backtracking':
-                self._apply_backtracking_correction(
-                    interval_start, ntp_measurement.timestamp, error, interval_duration
-                )
-            else:
-                logger.error(f"Unknown correction method: {method}")
-                return None
+        # DETAILED DEBUG: Show error calculation (NO LOCK HELD)
+        logger.info(f"[NTP_CORRECTION_{method.upper()}] ═══════════════════════════════════════════")
+        logger.info(f"[NTP_CORRECTION_{method.upper()}] NEW NTP MEASUREMENT ARRIVED:")
+        logger.info(f"  NTP timestamp: {ntp_measurement.timestamp:.2f}")
+        logger.info(f"  NTP offset (ground truth): {ntp_measurement.offset*1000:.3f}ms")
+        logger.info(f"  NTP uncertainty: {ntp_measurement.uncertainty*1000:.3f}ms")
+        logger.info(f"[NTP_CORRECTION_{method.upper()}] PREDICTION AT NTP TIME:")
+        logger.info(f"  Prediction offset: {prediction_at_ntp['offset']*1000:.3f}ms")
+        logger.info(f"  Prediction source: {prediction_at_ntp['source']}")
+        logger.info(f"[NTP_CORRECTION_{method.upper()}] ERROR CALCULATION:")
+        logger.info(f"  Error = NTP_truth - Prediction")
+        logger.info(f"  Error = {ntp_measurement.offset*1000:.3f}ms - {prediction_at_ntp['offset']*1000:.3f}ms")
+        logger.info(f"  Error = {error*1000:.3f}ms")
+        if abs(error*1000) < 1.0:
+            logger.info(f"  ✓ Error is SMALL (<1ms) - prediction was accurate!")
+        else:
+            logger.info(f"  ✗ Error is LARGE (≥1ms) - prediction missed the mark!")
 
-            # Add the new NTP measurement
-            self.add_ntp_measurement(ntp_measurement)
+        logger.info(f"[NTP_CORRECTION_{method.upper()}] CORRECTION INTERVAL:")
+        logger.info(f"  Start: {interval_start:.0f}")
+        logger.info(f"  End: {ntp_measurement.timestamp:.0f}")
+        logger.info(f"  Duration: {interval_duration:.0f}s")
+        logger.info(f"  Method: {method}")
+        logger.info(f"[NTP_CORRECTION_{method.upper()}] ═══════════════════════════════════════════")
 
-            logger.info(f"[NTP_CORRECTION_{method.upper()}] Correction applied to "
-                       f"{int(ntp_measurement.timestamp - interval_start)} measurements")
+        # PHASE 2: Apply correction - lock will be reacquired inside each method
+        if method == 'linear':
+            self._apply_linear_correction(interval_start, ntp_measurement.timestamp, error)
+        elif method == 'drift_aware':
+            self._apply_drift_aware_correction(
+                interval_start, ntp_measurement.timestamp, error,
+                offset_uncertainty, drift_uncertainty, interval_duration
+            )
+        elif method == 'advanced':
+            self._apply_advanced_correction(
+                interval_start, ntp_measurement.timestamp, error,
+                ntp_measurement.uncertainty, offset_uncertainty, drift_uncertainty
+            )
+        elif method == 'advance_absolute':
+            self._apply_advance_absolute_correction(
+                interval_start, ntp_measurement.timestamp, error,
+                ntp_measurement.uncertainty, offset_uncertainty, drift_uncertainty, interval_duration
+            )
+        elif method == 'backtracking':
+            self._apply_backtracking_correction(
+                interval_start, ntp_measurement.timestamp, error, interval_duration
+            )
+        else:
+            logger.error(f"Unknown correction method: {method}")
+            return None
 
-            # Return correction metadata for logging
-            return {
-                'error': error,
-                'interval_start': interval_start,
-                'interval_end': ntp_measurement.timestamp,
-                'interval_duration': interval_duration,
-                'method': method
-            }
+        # PHASE 3: Add the new NTP measurement (brief lock acquisition)
+        self.add_ntp_measurement(ntp_measurement)
+
+        logger.info(f"[NTP_CORRECTION_{method.upper()}] Correction applied to "
+                   f"{int(ntp_measurement.timestamp - interval_start)} measurements")
+
+        # Return correction metadata for logging
+        return {
+            'error': error,
+            'interval_start': interval_start,
+            'interval_end': ntp_measurement.timestamp,
+            'interval_duration': interval_duration,
+            'method': method
+        }
 
     def _apply_linear_correction(self, start_time: float, end_time: float, error: float):
         """
@@ -712,17 +717,25 @@ class DatasetManager:
 
         Distributes error linearly across time:
         correction(t) = (t - start) / (end - start) × error
+
+        PERFORMANCE FIX: Computes corrections first, then acquires lock briefly to apply them.
         """
         interval_duration = end_time - start_time
 
+        # PHASE 1: Compute corrections WITHOUT holding lock
+        corrections = {}
         for timestamp in range(int(start_time), int(end_time)):
-            if timestamp in self.measurement_dataset:
-                # Linear weight: α = (t_i - t_start) / (t_end - t_start)
-                alpha = (timestamp - start_time) / interval_duration if interval_duration > 0 else 0
+            # Linear weight: α = (t_i - t_start) / (t_end - t_start)
+            alpha = (timestamp - start_time) / interval_duration if interval_duration > 0 else 0
+            corrections[timestamp] = alpha * error
 
-                # Apply correction: ô_t_i'' ← ô_t_i + α · δ
-                self.measurement_dataset[timestamp]['offset'] += alpha * error
-                self.measurement_dataset[timestamp]['corrected'] = True
+        # PHASE 2: Acquire lock BRIEFLY to apply corrections
+        with self.lock:
+            for timestamp, correction_value in corrections.items():
+                if timestamp in self.measurement_dataset:
+                    # Apply correction: ô_t_i'' ← ô_t_i + α · δ
+                    self.measurement_dataset[timestamp]['offset'] += correction_value
+                    self.measurement_dataset[timestamp]['corrected'] = True
 
     def _apply_drift_aware_correction(self, start_time: float, end_time: float, error: float,
                                      σ_offset: float, σ_drift: float, Δt: float):
@@ -734,6 +747,8 @@ class DatasetManager:
         - drift_correction: based on drift uncertainty accumulated over time
 
         correction(t) = offset_corr + drift_corr × (t - start)
+
+        PERFORMANCE FIX: Computes corrections first, then acquires lock briefly to apply them.
         """
         # Variance contributions
         var_offset = σ_offset ** 2
@@ -757,18 +772,23 @@ class DatasetManager:
                    f"offset_corr={offset_correction*1000:.2f}ms, "
                    f"drift_corr={drift_correction*1e6:.2f}μs/s")
 
-        # Apply to each timestamp
+        # PHASE 1: Compute corrections WITHOUT holding lock
+        corrections = {}
         for timestamp in range(int(start_time), int(end_time)):
-            if timestamp in self.measurement_dataset:
-                # Time since interval start
-                t_elapsed = timestamp - start_time
+            # Time since interval start
+            t_elapsed = timestamp - start_time
 
-                # Combined correction: offset + drift × time
-                correction = offset_correction + (drift_correction * t_elapsed)
+            # Combined correction: offset + drift × time
+            correction = offset_correction + (drift_correction * t_elapsed)
+            corrections[timestamp] = (correction, drift_correction)
 
-                self.measurement_dataset[timestamp]['offset'] += correction
-                self.measurement_dataset[timestamp]['drift'] += drift_correction  # Also adjust drift
-                self.measurement_dataset[timestamp]['corrected'] = True
+        # PHASE 2: Acquire lock BRIEFLY to apply corrections
+        with self.lock:
+            for timestamp, (offset_corr, drift_corr) in corrections.items():
+                if timestamp in self.measurement_dataset:
+                    self.measurement_dataset[timestamp]['offset'] += offset_corr
+                    self.measurement_dataset[timestamp]['drift'] += drift_corr  # Also adjust drift
+                    self.measurement_dataset[timestamp]['corrected'] = True
 
     def _apply_advanced_correction(self, start_time: float, end_time: float, error: float,
                                    sigma_measurement: float, sigma_prediction: float, sigma_drift: float):
