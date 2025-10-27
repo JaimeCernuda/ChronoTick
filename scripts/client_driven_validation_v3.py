@@ -408,7 +408,11 @@ def main():
     last_ntp_offset = None         # Last ChronoTick offset prediction in seconds (for fix7)
 
     while True:
-        elapsed = time.time() - test_start_time
+        loop_iteration_start = time.time()
+        elapsed = loop_iteration_start - test_start_time
+
+        # DIAGNOSTIC: Loop heartbeat
+        print(f"[{elapsed:6.1f}s] 🔄 LOOP_START (sample {sample_number + 1})")
 
         # Check if test duration reached
         if elapsed >= test_duration_seconds:
@@ -419,13 +423,18 @@ def main():
 
         # Get system time
         system_time = time.time()
+        print(f"[{elapsed:6.1f}s]    → Got system_time: {system_time}")
 
         # Initialize correction to None (BUGFIX: prevent UnboundLocalError at line 554)
         correction = None
 
         # Get ChronoTick time (V3: Implement Fix 1 + Fix 2)
         try:
+            print(f"[{elapsed:6.1f}s]    → Calling pipeline.get_real_clock_correction()...")
+            api_call_start = time.time()
             correction = pipeline.get_real_clock_correction(system_time)
+            api_call_duration = time.time() - api_call_start
+            print(f"[{elapsed:6.1f}s]    → API call took {api_call_duration*1000:.1f}ms")
 
             # Extract fields
             chronotick_offset_ms = correction.offset_correction * 1000
@@ -576,8 +585,11 @@ def main():
 
         if elapsed - last_ntp_time >= adaptive_ntp_interval:
             try:
-                print(f"[{elapsed:6.1f}s] Querying {len(ntp_servers)} NTP servers in parallel...")
+                print(f"[{elapsed:6.1f}s] ⏰ Starting NTP query ({len(ntp_servers)} servers in parallel)...")
+                ntp_query_start = time.time()
                 ntp_result = ntp_client.get_averaged_measurement()
+                ntp_query_duration = time.time() - ntp_query_start
+                print(f"[{elapsed:6.1f}s] ✅ NTP query completed in {ntp_query_duration:.1f}s")
 
                 if ntp_result is not None:
                     # Calculate NTP reference time
@@ -633,6 +645,8 @@ def main():
                     print(f"⚠️  Multi-server NTP query failed at {elapsed:.1f}s: {e}")
 
         # Log to CSV (V3: New columns for Fix 1 & Fix 2 analysis + system clock drift + EXPERIMENT-14 drift fields + time_fix3/4/5 + calibration)
+        print(f"[{elapsed:6.1f}s]    → Writing to CSV...")
+        csv_write_start = time.time()
         csv_writer.writerow([
             sample_number,
             elapsed,
@@ -668,12 +682,22 @@ def main():
             ntp_rejected_servers,
             has_ntp
         ])
+        csv_write_duration = time.time() - csv_write_start
+        print(f"[{elapsed:6.1f}s]    → CSV write took {csv_write_duration*1000:.1f}ms")
+
+        # Flush CSV to disk
+        csv_file.flush()
 
         # Periodic progress update (every 60 samples = 1 minute)
         if sample_number % 60 == 0:
             print(f"[{elapsed/60:6.1f}min] Progress: {sample_number} samples, {ntp_sample_count} NTP measurements")
 
+        # Calculate total loop iteration time
+        loop_iteration_duration = time.time() - loop_iteration_start
+        print(f"[{elapsed:6.1f}s] ✅ LOOP_END (iteration took {loop_iteration_duration*1000:.1f}ms)")
+
         # Sleep until next sample
+        print(f"[{elapsed:6.1f}s]    → Sleeping {SAMPLE_INTERVAL_SECONDS}s...")
         time.sleep(SAMPLE_INTERVAL_SECONDS)
 
     # Close CSV
