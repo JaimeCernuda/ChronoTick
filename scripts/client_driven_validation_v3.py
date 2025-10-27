@@ -420,6 +420,9 @@ def main():
         # Get system time
         system_time = time.time()
 
+        # Initialize correction to None (BUGFIX: prevent UnboundLocalError at line 554)
+        correction = None
+
         # Get ChronoTick time (V3: Implement Fix 1 + Fix 2)
         try:
             correction = pipeline.get_real_clock_correction(system_time)
